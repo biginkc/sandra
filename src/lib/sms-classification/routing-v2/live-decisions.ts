@@ -69,12 +69,41 @@ export async function recordLiveV2Decision(
    * ("hold_failed"). Without a reason the row is inserted as before.
    */
   safetyHoldReason?: string | null,
-): Promise<"recorded" | "duplicate" | "failed" | "hold_failed"> {
+  opts: { backfillNewestFence?: boolean } = {},
+): Promise<"recorded" | "duplicate" | "failed" | "hold_failed" | "newer_inbound"> {
+  return recordLiveV2DecisionRow(db, liveDecisionRow(context, result), safetyHoldReason, opts);
+}
+
+/**
+ * Record an already-built decision row (the routing v2 backfill replays the row a classify-only
+ * run built). Same contract as recordLiveV2Decision.
+ */
+export async function recordLiveV2DecisionRow(
+  db: SupabaseClient<Database>,
+  row: Record<string, unknown>,
+  safetyHoldReason?: string | null,
+  /**
+   * Routing v2 backfill: record only if this inbound is still the newest seller text on the lead,
+   * checked atomically with the decision and its safety effects (routing_v2_backfill_record_live_decision).
+   */
+  opts: { backfillNewestFence?: boolean } = {},
+): Promise<"recorded" | "duplicate" | "failed" | "hold_failed" | "newer_inbound"> {
+  if (opts.backfillNewestFence) {
+    try {
+      const { data, error } = await (db as unknown as {
+        rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+      }).rpc("routing_v2_backfill_record_live_decision", { p_row: row, p_hold_reason: safetyHoldReason ?? null });
+      if (error) return safetyHoldReason ? "hold_failed" : "failed";
+      return data === "newer_inbound" ? "newer_inbound" : data === "duplicate" ? "duplicate" : data === "recorded" ? "recorded" : "failed";
+    } catch {
+      return safetyHoldReason ? "hold_failed" : "failed";
+    }
+  }
   if (safetyHoldReason) {
     try {
       const { data, error } = await (db as unknown as {
         rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
-      }).rpc("routing_v2_record_live_decision", { p_row: liveDecisionRow(context, result), p_hold_reason: safetyHoldReason });
+      }).rpc("routing_v2_record_live_decision", { p_row: row, p_hold_reason: safetyHoldReason });
       if (!error) return data === "duplicate" ? "duplicate" : data === "recorded" ? "recorded" : "failed";
       // A database without the recorder: the plain insert below (its effects then stay unrecorded,
       // so the apply gate and the sweep treat it as unrecovered until its hold lands).
@@ -85,7 +114,7 @@ export async function recordLiveV2Decision(
     }
   }
   try {
-    const { error } = await (db as unknown as Loose).from("routing_v2_live_decisions").insert(liveDecisionRow(context, result));
+    const { error } = await (db as unknown as Loose).from("routing_v2_live_decisions").insert(row);
     if (!error) return "recorded";
     return error.code === "23505" ? "duplicate" : "failed";
   } catch {

@@ -676,6 +676,68 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     expect(count).toBe(0);
   });
 
+  it("rejects create with SENDER_NOT_SENDABLE when the active sender is not attached to a texting campaign", async () => {
+    const orgId = await getOrgId();
+    await seedSenderCatalog(testClient, orgId, ["+15550002222"], { sendable: false });
+    const email = uniqueCampaignEmail("campaign-unsendable-sender");
+    currentUserId = await createAuthUser(email);
+    currentEmail = email;
+
+    const result = await createCampaign({
+      name: "Unsendable Sender Campaign",
+      body: "Should never save",
+      senderNumber: "+15550002222",
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-unsendable", kind: "vacancy", tri: "yes" }],
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("SENDER_NOT_SENDABLE");
+    const { count } = await testClient
+      .from("campaigns")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("rejects reviving an archived campaign when its sender is no longer sendable", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-unsendable-revive");
+    currentUserId = await createAuthUser(email);
+    currentEmail = email;
+    const input = {
+      name: "Revive Unsendable",
+      body: "First body",
+      senderNumber: MOCK_SENDER_PRIMARY,
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-revive-unsendable", kind: "vacancy" as const, tri: "yes" as const }],
+      },
+    };
+    const created = await createCampaign(input);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect((await archiveCampaign(created.data.id)).ok).toBe(true);
+
+    // Sendillo detached the number from the campaign since.
+    await seedSenderCatalog(testClient, orgId, [MOCK_SENDER_PRIMARY], { sendable: false });
+
+    const revived = await createCampaign({ ...input, body: "Second body" });
+    expect(revived.ok).toBe(false);
+    if (revived.ok) return;
+    expect(revived.error.code).toBe("SENDER_NOT_SENDABLE");
+    const { data: row } = await testClient
+      .from("campaigns")
+      .select("status, archived_at")
+      .eq("id", created.data.id)
+      .single();
+    expect(row?.archived_at).not.toBeNull();
+  });
+
   it("rejects create with PROVIDER_CAMPAIGN_NOT_FOUND for a provider campaign missing from the catalog", async () => {
     const email = uniqueCampaignEmail("campaign-bad-provider-campaign");
     const userId = await createAuthUser(email);

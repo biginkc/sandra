@@ -99,14 +99,22 @@ export async function executeV2Stop(
   if (action.kind === "hold_alert") return { kind: "hold_alert", alert: action.alert, reason: `model_stop_hold:${action.by}` };
 
   try {
-    const { data, error } = await (admin as unknown as Loose).rpc("fn_apply_model_stop_suppression", {
+    const args = {
       p_org_id: input.orgId,
       p_phone_e164: phone,
       p_inbound_message_id: input.inboundMessageId,
       p_property_id: input.propertyId,
       p_contact_id: input.contactId,
       p_detail: { step: action.step, signal: action.signal, probability: action.probability },
-    });
+    };
+    // Fable N-1 / Opus N6 (20261031140000): the suppression and the release of the stop hold this
+    // inbound's decision already wrote commit in ONE transaction, so a Jev-decided suppressed stop
+    // is not also left held for a person. A database without the wrapper falls back to the plain
+    // write (the hold then stays: fail safe).
+    let { data, error } = await (admin as unknown as Loose).rpc("routing_v2_apply_model_stop_and_release", args);
+    if (error && /PGRST202|42883|does not exist|Could not find/i.test(String(error.message))) {
+      ({ data, error } = await (admin as unknown as Loose).rpc("fn_apply_model_stop_suppression", args));
+    }
     if (error) throw new Error(String(error.message));
     const r = (data ?? {}) as { status?: string; suppressionId?: string | null };
     if (r.status === "flag_off") return { kind: "human_review", reason: "flag_off" };

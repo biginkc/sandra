@@ -1,4 +1,4 @@
-import { WebClient } from "@slack/web-api";
+import { WebClient, type ChatPostMessageArguments } from "@slack/web-api";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
@@ -7,6 +7,7 @@ import { getDecryptedToken } from "@/lib/integrations/tokens/store";
 import { sendRepSmsReminder } from "@/lib/notifications/rep-sms";
 import type { Database } from "@/lib/supabase/types";
 
+import type { SlackBlock } from "./slack-thread";
 import type { ChannelResult, EmailMessage } from "./types";
 
 /** Same bounds as the appointment-reminder path: no SDK retry loop, 10s HTTP cap. */
@@ -34,7 +35,7 @@ export function createChannelSenders(
   const env: Env = opts.env ?? process.env;
   const fetchImpl = opts.fetch ?? fetch;
 
-  async function sendSlack(userId: string, text: string): Promise<ChannelResult> {
+  async function sendSlack(userId: string, text: string, blocks?: SlackBlock[]): Promise<ChannelResult> {
     let slack: WebClient;
     let channel: string;
     try {
@@ -51,7 +52,10 @@ export function createChannelSenders(
       return { status: "failed", error: messageOf(error) };
     }
     try {
-      const posted = await slack.chat.postMessage({ channel, text });
+      // `text` is unchanged (notification + fallback); blocks add the linked headline and thread.
+      const posted = await slack.chat.postMessage(
+        blocks && blocks.length > 0 ? ({ channel, text, blocks } as unknown as ChatPostMessageArguments) : { channel, text },
+      );
       if (!posted.ts) return { status: "failed", error: "slack_no_receipt", terminal: true };
       return { status: "sent" };
     } catch (error) {

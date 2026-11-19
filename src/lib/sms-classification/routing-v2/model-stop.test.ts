@@ -156,7 +156,8 @@ const OTHER = "00000000-0000-4000-8000-000000000009";
 const on = (extra: Record<string, unknown> = {}) =>
   parseRoutingV2Flags({ questions_live: true, model_stop_suppression: true, canary_property_ids: [base.propertyId, OTHER], ...extra });
 const deps = (flags: ReturnType<typeof parseRoutingV2Flags>) => ({ readFlags: async () => flags });
-const applyCalls = (rpc: ReturnType<typeof vi.fn>) => rpc.mock.calls.filter((c) => c[0] === "fn_apply_model_stop_suppression");
+const APPLY_FNS = new Set(["routing_v2_apply_model_stop_and_release", "fn_apply_model_stop_suppression"]);
+const applyCalls = (rpc: ReturnType<typeof vi.fn>) => rpc.mock.calls.filter((c) => APPLY_FNS.has(c[0] as string));
 
 describe("PR-I executor", () => {
   it.each([
@@ -201,7 +202,7 @@ describe("PR-I executor", () => {
     expect(applyCalls(rpc)).toHaveLength(0);
   });
 
-  it("suppress: eligible phone → calls fn_apply_model_stop_suppression with the normalized phone and Jev detail", async () => {
+  it("suppress: eligible phone → calls the suppress-and-release wrapper (one transaction) with the normalized phone and Jev detail", async () => {
     const { client, rpc } = fakeAdmin({ data: { status: "suppressed", suppressionId: "s1" } }, { data: [base.propertyId, OTHER] });
     const out = await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()));
     expect(out).toEqual({ kind: "suppressed", suppressionId: "s1", status: "suppressed" });
@@ -210,7 +211,8 @@ describe("PR-I executor", () => {
       p_phone_e164: "+18165550101",
       p_property_id: base.propertyId,
     });
-    expect(rpc).toHaveBeenCalledWith("fn_apply_model_stop_suppression", {
+    expect(applyCalls(rpc).map((c) => c[0])).toEqual(["routing_v2_apply_model_stop_and_release"]);
+    expect(rpc).toHaveBeenCalledWith("routing_v2_apply_model_stop_and_release", {
       p_org_id: base.orgId,
       p_phone_e164: "+18165550101",
       p_inbound_message_id: base.inboundMessageId,
@@ -218,6 +220,26 @@ describe("PR-I executor", () => {
       p_contact_id: base.contactId,
       p_detail: { step: "asked_stop", signal: "asked_stop", probability: 0.95 },
     });
+  });
+
+  it("a database without the wrapper falls back to fn_apply_model_stop_suppression (hold stays: fail safe)", async () => {
+    const rpc = vi.fn(async (fn: string) => {
+      if (fn === "fn_model_stop_phone_property_ids") return { data: [base.propertyId], error: null };
+      if (fn === "routing_v2_apply_model_stop_and_release") return { data: null, error: { message: "PGRST202 Could not find the function" } };
+      return { data: { status: "suppressed", suppressionId: "s2" }, error: null };
+    });
+    const out = await executeV2Stop({ rpc } as never, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()));
+    expect(out).toEqual({ kind: "suppressed", suppressionId: "s2", status: "suppressed" });
+    expect(applyCalls(rpc).map((c) => c[0])).toEqual(["routing_v2_apply_model_stop_and_release", "fn_apply_model_stop_suppression"]);
+  });
+
+  it("a wrapper error other than missing → today's path (hold), no fallback write", async () => {
+    const { client, rpc } = fakeAdmin({ error: { message: "deadlock detected" } }, { data: [base.propertyId] });
+    expect(await executeV2Stop(client, { ...base, decision: decide({ asked_stop: 0.95 }), final: null }, deps(on()))).toEqual({
+      kind: "human_review",
+      reason: "model_stop_failed:write",
+    });
+    expect(applyCalls(rpc).map((c) => c[0])).toEqual(["routing_v2_apply_model_stop_and_release"]);
   });
 
   it("multi-property phone with one ineligible property → today's path, no write", async () => {
@@ -364,7 +386,10 @@ describe("PR-I flag-off parity: the live opt-out path is not touched", () => {
     expect(dispatch).toContain("proposeDeferredJevDisposition");
     expect(dispatch).toContain("HOLD_JEV_OPTED_OUT_NEEDS_CONFIRM");
     expect(thresholds).not.toContain("model-stop");
-    for (const src of [dispatch, thresholds]) expect(src).not.toContain("fn_apply_model_stop_suppression");
+    for (const src of [dispatch, thresholds]) {
+      expect(src).not.toContain("fn_apply_model_stop_suppression");
+      expect(src).not.toContain("routing_v2_apply_model_stop_and_release");
+    }
     // Cutover: one import (the adapter, which re-checks flags + canary itself) and one call site.
     expect(dispatch.match(/routing-v2\/model-stop-suppression/g)).toHaveLength(1);
     expect(dispatch.match(/executeV2Stop\(/g)).toHaveLength(1);

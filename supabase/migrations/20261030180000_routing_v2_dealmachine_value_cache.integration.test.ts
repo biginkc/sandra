@@ -6,6 +6,7 @@ import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
+import { reapplyRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 /**
  * routing v2 PR-E DealMachine value cache (20261030180000). Local-only. The rollback and the
@@ -58,6 +59,9 @@ afterAll(async () => {
   await db.query("delete from public.properties where org_id in ($1, $2)", [orgId, otherOrgId]);
   await db.query("delete from public.organizations where id in ($1, $2)", [orgId, otherOrgId]);
   await pool.end();
+  // Shared-stack safety (test-only): this suite commits 20261030180000's own migration/rollback for its
+  // two-connection tests; restore every newer routing v2 migration so later suites see the real schema.
+  await reapplyRoutingV2After(db, "20261030180000");
   await db.end();
 });
 

@@ -57,3 +57,21 @@ export async function unwindRoutingV2After(db: Client, version: string): Promise
   }
   return applied;
 }
+
+/**
+ * Shared-stack repair for the few routing v2 DB suites that must COMMIT an older migration (or its
+ * rollback) because a second connection needs it: afterwards, re-apply every routing v2 migration
+ * NEWER than `version`, committed and in order, so the stack ends with exactly the schema the full
+ * migration chain defines (otherwise later suites on the same stack see the older bodies and
+ * missing columns). Call it from the suite's afterAll with a connection that holds no open
+ * transaction.
+ */
+export async function reapplyRoutingV2After(db: Client, version: string): Promise<string[]> {
+  const newer = readdirSync(MIGRATIONS)
+    .filter((f) => /^\d{14}_routing_v2_.*\.sql$/.test(f) && f.slice(0, 14) > version)
+    .sort();
+  for (const f of newer) {
+    await db.query(`begin; ${strip(readFileSync(path.join(MIGRATIONS, f), "utf8"))}; commit;`);
+  }
+  return newer;
+}

@@ -4,6 +4,13 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
+// The obligation store is service-role only; a denied user-scoped read is retried with the admin client.
+const adminObligations = vi.hoisted(() => ({ data: [] as unknown[], error: null as { message: string } | null }));
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    rpc: async () => ({ data: adminObligations.error ? null : adminObligations.data.length > 0, error: adminObligations.error }),
+  }),
+}));
 
 import { assertSendAllowed, checkSendAllowed, decideSendAllowed, normalizeDestination, parseTestDestAllowlist, REFUSED_NON_OWNED } from "./send-allowlist";
 
@@ -43,8 +50,12 @@ describe("§5.4 send allowlist (pure)", () => {
 function fakeDb(lead: { data?: unknown; error?: { code?: string; message: string } | null }) {
   const inserts: Array<Record<string, unknown>> = [];
   const db = {
+    // The routing v2 obligation predicate (none open on these leads).
+    rpc: async () => ({ data: false, error: null }),
     from: (t: string) => ({
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: lead.data ?? null, error: lead.error ?? null }) }) }),
+      select: () => ({ eq: () => ({
+        maybeSingle: async () => ({ data: lead.data ?? null, error: lead.error ?? null }),
+      }) }),
       insert: async (row: Record<string, unknown>) => { inserts.push({ table: t, ...row }); return { error: null }; },
     }),
   };
@@ -92,6 +103,56 @@ describe("§5.4 assertSendAllowed (boundary)", () => {
   });
   it("checkSendAllowed names a confirmed refusal refused_non_owned (the terminal kind)", async () => {
     expect(await checkSendAllowed(fakeDb({ data: { test_run_id: "run-1" } }).db, { ...base, destination: "+18165550191" })).toEqual({ allowed: false, why: REFUSED_NON_OWNED });
+  });
+});
+
+// Round 18 (#956 CI, outbox O03/O07): the obligation gate covers automated sends only.
+function obligationDb(obligations: { data?: unknown[]; error?: { message: string } | null }) {
+  const reads: string[] = [];
+  const db = {
+    rpc: async (fn: string) => {
+      reads.push(fn);
+      return { data: obligations.error ? null : (obligations.data ?? []).length > 0, error: obligations.error ?? null };
+    },
+    from: (t: string) => {
+      reads.push(t);
+      return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { test_run_id: null }, error: null }) }) }), insert: async () => ({ error: null }) };
+    },
+  };
+  return { db: db as never, reads };
+}
+describe("round 18 safety-obligation gate at the send boundary", () => {
+  const send = { ...base, destination: "+18165550191", env: {} };
+  it("an open obligation refuses an automated send and an automated queued release (retryable)", async () => {
+    expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, send)).toEqual({ allowed: false, why: "safety_obligation_open" });
+    expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, origin: "queued_release", queuedSendOrigin: "automated" })).toEqual({ allowed: false, why: "safety_obligation_open" });
+    expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, origin: "queued_release" })).toEqual({ allowed: false, why: "safety_obligation_open" });
+  });
+  it("an exception from the obligation read (e.g. a malformed client) fails closed, never 'no obligation'", async () => {
+    const throwing = { rpc: () => { throw new TypeError("boom"); }, from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { test_run_id: null }, error: null }) }) }) }) };
+    expect(await checkSendAllowed(throwing as never, send)).toEqual({ allowed: false, why: "safety_obligation_open" });
+  });
+  it("a person-initiated send (a held draft's Send) is never gated on an open obligation", async () => {
+    expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, personInitiated: true })).toEqual({ allowed: true });
+  });
+  it("an unreadable store fails closed for automated sends", async () => {
+    expect(await checkSendAllowed(obligationDb({ error: { message: "canceling statement due to statement timeout" } }).db, send)).toEqual({ allowed: false, why: "safety_obligation_open" });
+  });
+  it("a user-scoped client denied the store (outbox O03/O07): the admin client decides; no obligation = allowed, an obligation = refused", async () => {
+    const denied = { error: { message: "permission denied for table routing_v2_safety_obligations" } };
+    adminObligations.data = []; adminObligations.error = null;
+    expect(await checkSendAllowed(obligationDb(denied).db, { ...send, origin: "queued_release" })).toEqual({ allowed: true });
+    adminObligations.data = [{ id: "x" }];
+    expect(await checkSendAllowed(obligationDb(denied).db, { ...send, origin: "queued_release" })).toEqual({ allowed: false, why: "safety_obligation_open" });
+    adminObligations.data = []; adminObligations.error = { message: "timeout" };
+    expect(await checkSendAllowed(obligationDb(denied).db, { ...send, origin: "queued_release" })).toEqual({ allowed: false, why: "safety_obligation_open" });
+    adminObligations.error = null;
+  });
+  it("a text the person queued and then released is never gated on obligations, even unreadable from a user-scoped client", async () => {
+    const denied = obligationDb({ error: { message: "permission denied for table routing_v2_safety_obligations" } });
+    expect(await checkSendAllowed(denied.db, { ...send, origin: "queued_release", queuedSendOrigin: "manual" })).toEqual({ allowed: true });
+    expect(denied.reads).not.toContain("routing_v2_has_unresolved_obligation");
+    expect(await checkSendAllowed(obligationDb({ data: [{ id: "x" }] }).db, { ...send, origin: "manual" })).toEqual({ allowed: true });
   });
 });
 

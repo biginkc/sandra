@@ -9,6 +9,7 @@ import { unwindRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 import { ROUTING_V2_DRIPS } from "@/lib/sequences/routing-v2/drip-spec";
 import { isV2Eligible, parseRoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
+import { reapplyRoutingV2After } from "@/lib/testing/routing-v2-db-unwind";
 
 /**
  * Routing v2 PR-C (20261030181000): versioned drip seed + route_reply_transition (§14) +
@@ -32,6 +33,9 @@ beforeAll(async () => {
   await db.connect();
 });
 afterAll(async () => {
+  // Shared-stack safety (test-only): this suite commits 20261030181000's own migration/rollback for its
+  // two-connection tests; restore every newer routing v2 migration so later suites see the real schema.
+  await reapplyRoutingV2After(db, "20261030181000");
   await db.end();
 });
 

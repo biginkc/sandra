@@ -837,9 +837,19 @@ function createMockSupabase(state: MockState) {
     let updateData: Partial<AiClaimRow> | null = null;
 
     const ltFilters = new Map<string, unknown>();
+    const neqFilters = new Map<string, unknown>();
+    let orMarker: string | null = null;
     const matches = (row: AiClaimRow) => {
       for (const [field, value] of eqFilters) {
         if (row[field as keyof AiClaimRow] !== value) return false;
+      }
+      for (const [field, value] of neqFilters) {
+        if (row[field as keyof AiClaimRow] === value) return false;
+      }
+      // `.or("error_message.is.null,error_message.neq.<marker>")` (the reclaim's marker guard).
+      if (orMarker !== null) {
+        const em = (row as { error_message?: string | null }).error_message ?? null;
+        if (!(em === null || em !== orMarker)) return false;
       }
       // `.lt(col, "now")`: the database's clock ('now'); the fake's clock is Date.now().
       for (const [field, value] of ltFilters) {
@@ -911,6 +921,14 @@ function createMockSupabase(state: MockState) {
       },
       lt(field: string, value: unknown) {
         ltFilters.set(field, value);
+        return query;
+      },
+      neq(field: string, value: unknown) {
+        neqFilters.set(field, value);
+        return query;
+      },
+      or(expr: string) {
+        orMarker = /error_message\.neq\.([a-z0-9_]+)/.exec(expr)?.[1] ?? null;
         return query;
       },
       insert(value: Partial<AiClaimRow>) {
@@ -7826,7 +7844,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
           ["ai_responder_disabled property", (st: MockState) => { st.property.ai_responder_disabled = true; }],
           ["rep_sms_human_takeover flag", (st: MockState) => { st.property.last_ai_escalation_reason = "rep_sms_human_takeover"; }],
           ["existing ai_response_claims row for the inbound", (st: MockState) => {
-            st.aiClaims.push({ id: "claim-x", inbound_message_id: "inbound-gate", lease_expires_at: new Date().toISOString(), response_kind: "reply", status: "completed" } as never);
+            st.aiClaims.push({ id: "claim-x", inbound_message_id: "inbound-gate", lease_expires_at: new Date().toISOString(), response_kind: "sms_ai_responder_v1", status: "completed" } as never);
           }],
           ["claim lookup error", (st: MockState) => { st.claimLimitLookupError = true; }],
           ["classification-run lookup error", (st: MockState) => { st.runLimitLookupError = true; }],

@@ -1,5 +1,7 @@
 "use server";
 
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
+
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
@@ -75,22 +77,6 @@ async function loadPropertyAddress(
     .eq("id", propertyId)
     .maybeSingle();
   return data?.address ?? "Appointment";
-}
-
-function buildAppointmentDeepLink(
-  propertyId?: string | null,
-  contactId?: string | null,
-): string {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ??
-    process.env.APP_URL ??
-    "https://sandra-sooty.vercel.app";
-  const normalizedBaseUrl = baseUrl.startsWith("http")
-    ? baseUrl
-    : `https://${baseUrl}`;
-  if (propertyId) return `${normalizedBaseUrl}/leads/${propertyId}`;
-  if (contactId) return `${normalizedBaseUrl}/messages?thread=${contactId}`;
-  return `${normalizedBaseUrl}/dashboard`;
 }
 
 function revalidateAppointmentPaths(task: TaskLookupRow | null): void {
@@ -534,10 +520,7 @@ export async function reassignAppointmentAction(
           const subjectLabel = task.related_property_id
             ? await loadPropertyAddress(supabase, task.related_property_id)
             : task.title;
-          const deepLink = buildAppointmentDeepLink(
-            task.related_property_id,
-            task.contact_id,
-          );
+          const deepLink = buildLeadDeepLink(task.related_property_id);
           await Promise.allSettled([
             dispatchTaskAssigned(supabase, {
               taskId,

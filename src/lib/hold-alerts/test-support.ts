@@ -32,6 +32,17 @@ export class FakeStore implements DeliveryStore {
     return nowIso;
   }
 
+  ambiguousWatermarks = new Map<string, string>();
+  /** Simulates the migration not being applied yet. */
+  ambiguousColumnMissing = false;
+  async getOrInitAmbiguousThreadAlertsSince(orgId: string, nowIso: string) {
+    if (this.ambiguousColumnMissing) throw new Error("column hold_alert_settings.ambiguous_thread_alerts_since does not exist");
+    const existing = this.ambiguousWatermarks.get(orgId);
+    if (existing) return existing;
+    this.ambiguousWatermarks.set(orgId, nowIso);
+    return nowIso;
+  }
+
   async ensure(input: EnsureInput): Promise<DeliveryRow> {
     const existing = this.rows.find(
       (r) =>
