@@ -1,11 +1,21 @@
 import { reportError } from "@/lib/errors/report";
-import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { HOT_ALERTS_START_ISO, HOT_HANDOFF_FAILED_REASONS, hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 
-import { digestMessage, hotPromotionSlackText, hotPromotionSmsText, slackFirstText, smsText } from "./messages";
+import {
+  digestMessage,
+  hotPromotionSlackHeadline,
+  hotPromotionSlackText,
+  hotPromotionSmsText,
+  slackFirstHeadline,
+  slackFirstText,
+  smsText,
+} from "./messages";
+import { buildSlackAlertBlocks, loadThreadWithDeadline, SLACK_THREAD_TIMEOUT_MS, type SlackHeadline, type ThreadLookup } from "./slack-thread";
 import {
   MAX_ATTEMPTS,
   ROUTE_MAX_DURATION_MS,
   type ChannelResult,
+  type DeliveryRow,
   type EmailMessage,
   type EnsureInput,
   type HoldAlertDeps,
@@ -228,7 +238,57 @@ export async function runHoldAlertsForOrg(
       !coveredByHotFlag(p) &&
       ![hotTextKey(p.inboundId), hotHandoffKey(p.inboundId), hotFailedKey(p.inboundId)].some((k) => hotKeysThisPass.has(k)),
   );
-  const alertPromotions = [...promotions, ...leadReplies];
+  // Ambiguous thread (HOLD_ALERT_AMBIGUOUS_THREAD_ENABLED=1 only): a reply threading could not tie
+  // to one property. Own watermark, set to now on the first enabled pass. A failure (e.g. the
+  // column not migrated yet) skips the feature for this pass only; everything else carries on.
+  let ambSince: string | null = null;
+  let ambFailed = false;
+  if (deps.loadAmbiguousThreadAlerts) {
+    try {
+      ambSince = await deps.store.getOrInitAmbiguousThreadAlertsSince(orgId, nowIso);
+    } catch (error) {
+      ambFailed = true;
+      reportError(error, { tags: { surface: "hold_alerts", orgId }, extra: { stage: "ambiguous_thread_since" } });
+    }
+  }
+  let ambLoaded: { promotions: HotPromotion[]; complete: boolean } = { promotions: [], complete: !ambFailed };
+  if (deps.loadAmbiguousThreadAlerts && ambSince) {
+    try {
+      ambLoaded = await deps.loadAmbiguousThreadAlerts(orgId, Date.parse(ambSince) > alertsSinceMs ? ambSince : mark.alertsSince);
+    } catch (error) {
+      ambLoaded = { promotions: [], complete: false };
+      reportError(error, { tags: { surface: "hold_alerts", orgId }, extra: { stage: "ambiguous_thread_load" } });
+    }
+  }
+  if (!ambLoaded.complete) {
+    reportError(new Error("hold alerts: ambiguous-thread load incomplete; some replies may not have alerted yet"), {
+      tags: { surface: "hold_alerts", orgId },
+    });
+  }
+  const ambStartMs = ambSince ? Date.parse(ambSince) : Number.NaN;
+  const ambiguousCandidates = ambLoaded.promotions.filter(
+    (p) => p.kind === "ambiguous_thread" && (p.drained === true || (isNewHold({ startedAt: p.assignedAt }, alertsSinceMs) && isNewHold({ startedAt: p.assignedAt }, ambStartMs))),
+  );
+  // One delivery pair per key, in priority order: hot promotions, hot holds, lead
+  // replies, then ambiguous threads. Task construction below consumes ONLY these
+  // selections, so a key two loaders both return is sent once, with the first wording.
+  const selectedKeys = new Set<string>();
+  const select = (list: HotPromotion[]) =>
+    list.filter((p) => {
+      if (selectedKeys.has(p.key)) return false;
+      selectedKeys.add(p.key);
+      return true;
+    });
+  const hotSelected = select(promotions);
+  for (const h of hotHolds) selectedKeys.add(h.key);
+  const leadSelected = select(leadReplies);
+  // An ambiguous reply that already alerts this pass under another key for the same inbound stays with that alert.
+  const ambiguousSelected = select(
+    ambiguousCandidates.filter(
+      (p) => !p.inboundId || ![hotTextKey(p.inboundId), hotHandoffKey(p.inboundId), hotFailedKey(p.inboundId), leadReplyKey(p.inboundId)].some((k) => selectedKeys.has(k)),
+    ),
+  );
+  const alertPromotions = [...hotSelected, ...leadSelected, ...ambiguousSelected];
   if (hotHolds.length === 0 && alertPromotions.length === 0 && !(deps.emailEnabled && holds.length > 0)) return summary;
 
   const recipients = await deps.loadRecipients(orgId);
@@ -278,7 +338,7 @@ export async function runHoldAlertsForOrg(
           if (p.kind === "selling_opportunity") {
             let allowed = false;
             try {
-              allowed = (await deps.v2OpportunityStillAllowed?.(orgId, p.propertyId, p.inboundId)) === true;
+              allowed = p.propertyId !== null && (await deps.v2OpportunityStillAllowed?.(orgId, p.propertyId, p.inboundId)) === true;
             } catch {
               allowed = false;
             }
@@ -293,16 +353,17 @@ export async function runHoldAlertsForOrg(
             }
             if (gate !== "ok") return { status: "skipped", reason: `routing_v2_alert:${gate}` };
           }
-          return channel === "slack"
-            ? deps.sendSlack(owner, hotPromotionSlackText(p, link))
-            : deps.sendSms(owner, hotPromotionSmsText(p, link));
+          if (channel === "sms") return deps.sendSms(owner, hotPromotionSmsText(p, link));
+          // Thread load runs after every gate, right before the provider call; it can't fail the send.
+          const blocks = await slackBlocks(deps, orgId, hotPromotionSlackHeadline(p, link), { inboundId: p.inboundId, propertyId: p.propertyId });
+          return deps.sendSlack(owner, hotPromotionSlackText(p, link), blocks);
         },
         requireOwner: true,
       });
     }
   };
   // Hot alerts are queued first, so a backlog of lead replies can never delay one.
-  for (const p of promotions) pushPromotion(p);
+  for (const p of hotSelected) pushPromotion(p);
   for (const { hold, key } of hotHolds) {
     for (const r of hotRecipients) {
       for (const channel of ["slack", "sms"] as const) {
@@ -312,14 +373,17 @@ export async function runHoldAlertsForOrg(
             const ownerCheck = await hotOwnerStillIs(deps, orgId, r.userId);
             if (ownerCheck) return ownerCheck;
             // Every hot hold pings Jarrad, whoever has the lead (owner decision 2026-10-19).
-            return channel === "slack" ? deps.sendSlack(r.userId, slackFirstText(hold, link)) : deps.sendSms(r.userId, smsText(hold, link));
+            if (channel === "sms") return deps.sendSms(r.userId, smsText(hold, link));
+            const blocks = await slackBlocks(deps, orgId, slackFirstHeadline(hold, link), { inboundId: hold.runInbound, propertyId: hold.propertyId });
+            return deps.sendSlack(r.userId, slackFirstText(hold, link), blocks);
           },
           requireOwner: true,
         });
       }
     }
   }
-  for (const p of leadReplies) pushPromotion(p);
+  for (const p of leadSelected) pushPromotion(p);
+  for (const p of ambiguousSelected) pushPromotion(p);
   if (deps.emailEnabled && holds.length > 0) {
     const hourKey = `digest:${orgId}:${new Date(nowMs).toISOString().slice(0, 13)}`;
     const message: EmailMessage = digestMessage(holds, nowMs, link);
@@ -331,13 +395,32 @@ export async function runHoldAlertsForOrg(
     }
   }
 
+  // Tasks for one alert (same key, recipient, stage: the Slack + SMS pair) are grouped,
+  // and EVERY channel's delivery row is persisted before either provider call. A run
+  // that dies after Slack therefore always leaves a pending SMS row to retry; a run
+  // that dies between the two inserts sent nothing, and the next pass re-ensures both.
+  const groups: Task[][] = [];
   for (const task of tasks) {
+    const last = groups[groups.length - 1];
+    const head = last?.[0];
+    if (head && head.input.holdKey === task.input.holdKey && head.input.recipientUserId === task.input.recipientUserId && head.input.stage === task.input.stage) last.push(task);
+    else groups.push([task]);
+  }
+  outer: for (const group of groups) {
     if (deps.now().getTime() - startMs >= budgetMs - TASK_START_RESERVE_MS) {
       summary.budgetExhausted = true;
       break;
     }
-    const outcome = await runTask(deps, task);
-    summary[outcome] += 1;
+    const rows: DeliveryRow[] = [];
+    for (const task of group) rows.push(await deps.store.ensure(task.input));
+    for (let i = 0; i < group.length; i += 1) {
+      if (i > 0 && deps.now().getTime() - startMs >= budgetMs - TASK_START_RESERVE_MS) {
+        summary.budgetExhausted = true;
+        break outer;
+      }
+      const outcome = await runTask(deps, group[i]!, rows[i]!);
+      summary[outcome] += 1;
+    }
   }
   return summary;
 }
@@ -345,9 +428,9 @@ export async function runHoldAlertsForOrg(
 async function runTask(
   deps: HoldAlertDeps,
   task: Task,
+  row: DeliveryRow,
 ): Promise<"sent" | "skipped" | "failed" | "untouched" | "deferred"> {
   const { store } = deps;
-  const row = await store.ensure(task.input);
   const claimable = (row.status === "pending" || row.status === "failed") && row.attempts < MAX_ATTEMPTS;
   if (!claimable) return "untouched";
 
@@ -407,4 +490,18 @@ function capFor(deps: HoldAlertDeps, input: EnsureInput): CapBucket | null {
     return { orgId: input.orgId, channel: "sms", recipientUserId: null, cap: MAX_SMS_PER_HOUR, sinceIso };
   }
   return null;
+}
+
+/** Max time the Slack thread lookup may add to one alert send. */
+export { SLACK_THREAD_TIMEOUT_MS };
+
+/**
+ * Slack alert blocks: linked headline + recent thread (Jarrad 2026-11-18). Fails
+ * open: a missing loader, a lookup error or the shared deadline sends the
+ * linked headline alone.
+ */
+export async function slackBlocks(deps: HoldAlertDeps, orgId: string, headline: SlackHeadline, lookup: ThreadLookup) {
+  const load = deps.loadSlackThread;
+  const thread = await loadThreadWithDeadline(load ? () => load(orgId, lookup) : undefined, { surface: "hold_alert_slack_thread", orgId });
+  return buildSlackAlertBlocks(headline, thread, deps.now().getTime());
 }

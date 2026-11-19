@@ -7,6 +7,8 @@ export interface TaskAssignedBlockInput {
   taskTypeLabel: string;
   taskId: string;
   deepLink: string;
+  /** Lead page URL: when set, the address text becomes the link (same words). */
+  leadLink?: string | null;
 }
 
 export interface MarkedDoneBlockInput {
@@ -14,6 +16,14 @@ export interface MarkedDoneBlockInput {
   propertyAddress: string;
   doneByUserName: string;
   deepLink: string;
+  leadLink?: string | null;
+}
+
+const escapeMrkdwn = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** The address as mrkdwn: a link to the lead when one is given, else unchanged. */
+function addressText(address: string, leadLink?: string | null): string {
+  return leadLink ? `<${leadLink}|${escapeMrkdwn(address)}>` : address;
 }
 
 /**
@@ -40,7 +50,7 @@ export function buildTaskAssignedBlocks(
         },
         {
           type: "mrkdwn",
-          text: input.propertyAddress,
+          text: addressText(input.propertyAddress, input.leadLink),
         },
       ],
     },
@@ -122,7 +132,7 @@ export function buildMarkedDoneBlocks(
         },
         {
           type: "mrkdwn",
-          text: input.propertyAddress,
+          text: addressText(input.propertyAddress, input.leadLink),
         },
       ],
     },

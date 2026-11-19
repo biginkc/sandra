@@ -1,12 +1,22 @@
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
-import { hotFailedKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
+import { ambiguousThreadKey, hotFailedKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 
 import type { HotPromotion } from "./types";
 import { MAX_ATTEMPTS } from "./types";
 
 const PAGE = 200;
-export const LEAD_REPLY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * Texts checked per round of "already alerted?" lookups. Each text becomes four
+ * hold_key values in one URL; 200 texts (800 keys) overflowed the request and
+ * PostgREST answered 400, so every lead text in a full batch was skipped.
+ */
+export const KEY_BATCH = 50;
+/** Only recent replies may page the owner. Older texts remain in the inbox.
+ * This bounds recovery after an outage: fixing delivery must not replay days of
+ * history as "new text". Allows twice the 30-minute dispatch settling window.
+ */
+export const LEAD_REPLY_LOOKBACK_MS = 60 * 60 * 1000;
 /**
  * A lead reply waits until AI dispatch is done with the text (its response
  * claim completed, its pipeline run finished, or processing.aiResponder.completedAt
@@ -28,7 +38,8 @@ export function dispatchDone(meta: ProcessingMeta, claimCompleted: boolean, crea
  * alerts Jarrad once, keyed lead_reply:<inbound>, whoever the lead is assigned to.
  * A lead = status past prospect, or a hot_seller_handoff / hot_seller_text event.
  * STOP texts included. A text that already got (or is getting) its own hot alert
- * on the same inbound is left to that alert. Read-only: never changes the lead.
+ * on the same inbound is left to that alert, as is one with a non-cancelled
+ * routing_v2_outbox alert row. Read-only: never changes the lead.
  */
 export async function loadLeadReplies(
   db: LooseSupabase,
@@ -36,6 +47,12 @@ export async function loadLeadReplies(
   alertsSince: string,
   nowMs: number = Date.now(),
   currentOwner: string | null = null,
+  /**
+   * HOLD_ALERT_AMBIGUOUS_THREAD_ENABLED=1: the ambiguous-thread loader owns
+   * ambiguous_thread:<inbound> keys (including their retries), so a text with any
+   * such row is left to it. Off (default): this loader is unchanged.
+   */
+  opts: { ambiguousOwnsKeys?: boolean } = {},
 ): Promise<{ promotions: HotPromotion[]; complete: boolean }> {
   const sinceMs = Math.max(Date.parse(alertsSince) || 0, nowMs - LEAD_REPLY_LOOKBACK_MS);
   const since = new Date(sinceMs).toISOString();
@@ -121,8 +138,8 @@ export async function loadLeadReplies(
   const skip = new Set<string>();
   const done = new Set<string>();
   const ids = leadMsgs.map((m) => m.id);
-  for (let i = 0; i < ids.length; i += PAGE) {
-    const batch = ids.slice(i, i + PAGE);
+  for (let i = 0; i < ids.length; i += KEY_BATCH) {
+    const batch = ids.slice(i, i + KEY_BATCH);
     const cl = await db
       .from("ai_response_claims")
       .select("inbound_message_id, status")
@@ -139,13 +156,27 @@ export async function loadLeadReplies(
       .eq("org_id", orgId)
       .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, HOT_FAILED_SOURCE_TYPE])
       .in("source_id", batch);
-    const keys = batch.flatMap((id) => [hotTextKey(id), hotHandoffKey(id), hotFailedKey(id), leadReplyKey(id)]);
+    const keys = batch.flatMap((id) => [
+      hotTextKey(id),
+      hotHandoffKey(id),
+      hotFailedKey(id),
+      leadReplyKey(id),
+      ...(opts.ambiguousOwnsKeys ? [ambiguousThreadKey(id)] : []),
+    ]);
     const dl = await db
       .from("hold_alert_deliveries")
       .select("hold_key, channel, status, attempts, recipient_user_id")
       .eq("org_id", orgId)
       .in("hold_key", keys);
-    if (ev.error || dl.error || cl.error || runs.error) {
+    // Routing v2 owns its own alert for this inbound unless that alert was cancelled.
+    const v2 = await db
+      .from("routing_v2_outbox")
+      .select("inbound_message_id, status")
+      .eq("org_id", orgId)
+      .eq("kind", "alert")
+      .in("status", ["pending", "claimed", "sent"])
+      .in("inbound_message_id", batch);
+    if (ev.error || dl.error || cl.error || runs.error || v2.error) {
       complete = false;
       for (const id of batch) skip.add(id);
       continue;
@@ -157,6 +188,9 @@ export async function loadLeadReplies(
     for (const m of leadMsgs) if (batch.includes(m.id) && !dispatchDone(m.metadata, completed.has(m.id), m.created_at, nowMs)) skip.add(m.id);
     for (const r of (ev.data ?? []) as Array<{ source_id: string; payload: { covered_by_hold?: unknown } | null }>) {
       if (r.payload?.covered_by_hold !== true) skip.add(r.source_id);
+    }
+    for (const r of (v2.data ?? []) as Array<{ inbound_message_id: string; status: string }>) {
+      skip.add(r.inbound_message_id);
     }
     const finished = new Map<string, Set<string>>();
     for (const d of (dl.data ?? []) as Array<{ hold_key: string; channel: string; status: string; attempts: number; recipient_user_id: string }>) {

@@ -5,7 +5,7 @@ import type { ValueLookupResult } from "./dealmachine-value";
 import { v2SliceAllowed, type RoutingV2Flags } from "./flags";
 import { DEFAULT_CUTOFF } from "./order";
 import { askAboveEightyPercent, extractDollarAmount, type ExtractedPrice } from "./price-amount";
-import { REPAIRS_ALERT_IDS, REPAIRS_FOLLOW_UP_IDS, type PropertyTypeOption, type RepairsFollowUpId } from "./questions";
+import { REPAIRS_ALERT_IDS, REPAIRS_FOLLOW_UP_IDS, type PropertyTypeOption, type RepairsFollowUpId, type V2QuestionId } from "./questions";
 import { v2ReplyText } from "./reply-texts";
 import type { V2Decision } from "./route";
 
@@ -19,8 +19,12 @@ import type { V2Decision } from "./route";
  *     (`V2_ROAD_ACTIONS.price_check`), and DealMachine is never asked.
  *   lot  → alert tagged vacant lot (`ALERT_land_price`), no 80% check, no DealMachine call.
  *   commercial → alert (`ALERT_commercial`), no DealMachine call.
+ *   no dollar amount at all + asked_offer ≥ 0.6 + named_price < 0.6 → the book_appointment
+ *     road with the asked_offer reply + Book appointment drip (no named-price alert), no call.
  *   no single dollar amount (none / multiple / range) → fair-price reply + alert, no call.
  *   DealMachine error / no value → fair-price reply + alert.
+ *   DealMachine record is land (living_area_sqft and num_bedrooms both 0/null) → the same
+ *     vacant-lot alert as Jev's lot answer, no 80% check, no seller reply. Unknown → as before.
  *   ask > 80% of value → repairs reply (`price_too_high`); follow-ups run on the next inbound.
  *   ask ≤ 80% (exactly 80% included) → fair-price reply + alert.
  */
@@ -28,6 +32,7 @@ export type V2PriceCheckOutcome =
   | "flag_off"
   | "land_price"
   | "commercial"
+  | "asked_offer_no_amount"
   | "no_single_amount"
   | "no_value"
   | "too_high"
@@ -49,6 +54,8 @@ export type V2PriceCheckInput = {
   decision: V2Decision;
   reply: string;
   propertyType: Record<PropertyTypeOption, number>;
+  /** Jev yes probabilities for this inbound. Missing = the asked-offer branch never fires. */
+  probabilities?: Partial<Record<V2QuestionId, number>>;
   /** Cached/claimed DealMachine lookup (only called when a single amount was named). */
   lookupValue: () => Promise<ValueLookupResult>;
 };
@@ -84,6 +91,27 @@ export async function runV2PriceCheck(input: V2PriceCheckInput): Promise<V2Price
   }
 
   const extracted = extractDollarAmount(input.reply);
+  // "What's your offer?" with no amount: row 11 won only because talked_price overlaps
+  // asked_offer. Ranges / multiple amounts and a likely spoken price keep the alert below.
+  const askedOffer = input.probabilities?.asked_offer;
+  const namedPrice = input.probabilities?.named_price;
+  if (
+    extracted.kind === "none"
+    && valid(askedOffer) && askedOffer >= DEFAULT_CUTOFF
+    && valid(namedPrice) && namedPrice < DEFAULT_CUTOFF
+  ) {
+    const decision: V2Decision = {
+      ...input.decision,
+      road: "book_appointment",
+      provenance: { by: "jev", row: "12", step: "book", signal: "asked_offer", probability: askedOffer },
+    };
+    return {
+      outcome: "asked_offer_no_amount",
+      action: { road: "book_appointment", steps: V2_ROAD_ACTIONS.book_appointment(decision) },
+      extracted,
+      value: null,
+    };
+  }
   if (extracted.kind !== "single") {
     return { outcome: "no_single_amount", action: priceAction(V2_PRICE_CHECK_ACTIONS.fair_or_no_value), extracted, value: null };
   }
@@ -93,6 +121,17 @@ export async function runV2PriceCheck(input: V2PriceCheckInput): Promise<V2Price
     lookup = await input.lookupValue();
   } catch {
     lookup = { kind: "no_value", reason: "lookup_threw" };
+  }
+  // Jarrad 2026-11-11: DealMachine says land (no living area, no bedrooms) → straight to him as
+  // the vacant-lot alert (same road as Jev's lot answer): no 80% check, no seller reply. This holds
+  // whether or not DealMachine gave a value (land values are unreliable / often missing).
+  if (lookup.isLand === true) {
+    return {
+      outcome: "land_price",
+      action: { road: "ALERT_land_price", steps: V2_ROAD_ACTIONS.ALERT_land_price(input.decision) },
+      extracted,
+      value: lookup.kind === "value" && Number.isFinite(lookup.value) && lookup.value > 0 ? lookup.value : null,
+    };
   }
   if (lookup.kind !== "value" || !Number.isFinite(lookup.value) || lookup.value <= 0) {
     return {
@@ -114,9 +153,20 @@ export async function runV2PriceCheck(input: V2PriceCheckInput): Promise<V2Price
  * Exact match against the approved text (whitespace-trimmed), never a fuzzy match.
  */
 export function isAfterRepairsReply(ourLastText: string | null | undefined): boolean {
+  return isExactlyApprovedReply(ourLastText, v2ReplyText("price_too_high"));
+}
+
+/**
+ * F5: was our last text the approved not-interested reply? Then a bare "ok" (Jev row 19) is
+ * an acknowledgement of the no, not a yes. Same exact-match rule as isAfterRepairsReply.
+ */
+export function isAfterNotInterestedReply(ourLastText: string | null | undefined): boolean {
+  return isExactlyApprovedReply(ourLastText, v2ReplyText("not_interested"));
+}
+
+function isExactlyApprovedReply(ourLastText: string | null | undefined, approved: string): boolean {
   if (typeof ourLastText !== "string") return false;
   const body = ourLastText.trim();
-  const approved = v2ReplyText("price_too_high");
   if (body === approved) return true;
   // Only Sandra's exact appended phrases; arbitrary trailing seller text is not stripped.
   return OPT_OUT_PHRASES.some((footer) => body === `${approved} ${footer}`);

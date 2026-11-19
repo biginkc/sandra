@@ -5,6 +5,8 @@ import { resolveV2Reply } from "./reply-template";
 import { v2ReplyText } from "./reply-texts";
 vi.mock("@/lib/sequences/template-vars", () => ({ loadTemplateVars: vi.fn(async () => ({ property_address: "12 Main St" })) }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
+const { blocks } = vi.hoisted(() => ({ blocks: vi.fn(() => false) }));
+vi.mock("@/lib/templates/rapid-offer", () => ({ rapidOfferBlocksSend: blocks }));
 const propertyId = "11111111-1111-4111-8111-111111111111";
 function fixture(options: { on?: boolean; approved?: boolean; edited?: boolean; custom?: boolean } = {}) {
   const source = options.custom ? "Unexpected but approved text" : v2ReplyText("where_property");
@@ -36,5 +38,10 @@ describe("v2 reply preparation", () => {
   it("preserves the existing fixed yes reply", async () => {
     const { db } = fixture();
     expect(await resolveV2Reply(db, { ...input, key: "said_yes" })).toMatchObject({ kind: "ready", body: v2ReplyText("said_yes"), templateId: null, fixed: true });
+  });
+  it("refuses when the shared rapid_offer guard blocks the send", async () => {
+    blocks.mockReturnValueOnce(true);
+    expect(await resolveV2Reply(fixture().db, input)).toEqual({ kind: "none", reason: "reply_preparation_failed" });
+    expect(blocks).toHaveBeenCalledWith(v2ReplyText("where_property"), { property_address: "12 Main St" });
   });
 });

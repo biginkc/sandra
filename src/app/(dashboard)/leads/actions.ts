@@ -1,5 +1,7 @@
 "use server";
 
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
+
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
@@ -2009,7 +2011,7 @@ export async function createLeadTaskAction(
       // off. This single load is the authoritative result threaded into
       // Slack (timezone + slackEnabled) below.
       const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
-      const deepLink = buildLeadTaskDeepLink(property.id);
+      const deepLink = buildLeadDeepLink(property.id);
       after(async () => {
         await Promise.allSettled([
           dispatchTaskAssigned(supabase, {
@@ -2060,17 +2062,6 @@ export async function createLeadTaskAction(
     });
     return errFromUnknown(e, "TASK_CREATE_FAILED");
   }
-}
-
-function buildLeadTaskDeepLink(propertyId: string): string {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ??
-    process.env.APP_URL ??
-    "https://sandra-sooty.vercel.app";
-  const normalizedBaseUrl = baseUrl.startsWith("http")
-    ? baseUrl
-    : `https://${baseUrl}`;
-  return `${normalizedBaseUrl}/leads/${propertyId}`;
 }
 
 // ============================================================================

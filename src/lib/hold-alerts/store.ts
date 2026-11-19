@@ -100,6 +100,21 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       return value as string;
     },
 
+    async getOrInitAmbiguousThreadAlertsSince(orgId, nowIso) {
+      // Same shape as the lead-reply watermark; a missing column throws (the pass skips the feature).
+      const settings = () => db.from("hold_alert_settings");
+      const set = await settings()
+        .update({ ambiguous_thread_alerts_since: nowIso })
+        .eq("org_id", orgId)
+        .is("ambiguous_thread_alerts_since", null)
+        .select("ambiguous_thread_alerts_since");
+      if (set.error) fail("ambiguous-thread watermark init", set.error);
+      const { data, error } = await settings().select("ambiguous_thread_alerts_since").eq("org_id", orgId).single();
+      const value = (data as { ambiguous_thread_alerts_since: string | null } | null)?.ambiguous_thread_alerts_since;
+      if (error || !value) fail("ambiguous-thread watermark select", error);
+      return value as string;
+    },
+
     async claim(row) {
       const { data, error } = await table()
         .update({ attempts: row.attempts + 1, status: "sending", sending_at: new Date().toISOString() })

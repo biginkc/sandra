@@ -194,12 +194,14 @@ jobs:
             "src/app/(dashboard)/properties/dnc-safe-actions.ts" \
             "src/app/(dashboard)/properties/promote-leads-actions.ts" \
             "src/app/(dashboard)/properties/_actions/count.ts" \
-            "src/app/(dashboard)/leads/actions.ts" \
-            src/lib/prospects/eligibility.ts \
-            src/lib/messaging/bulk-queue.ts
+            src/lib/prospects/eligibility.ts
+          # leads/actions.ts now shares operator lead links; its no-Search
+          # assertion remains in legacy-isolation.test.ts.
           # campaigns/actions.ts and workflows/bulk-sms.ts left this list in
           # #927: campaign pause/resume/cadence must loop batched RPCs (8s
           # statement_timeout). Prospects/Search behaviour is unaffected.
+          # lib/messaging/bulk-queue.ts left it for the {{rapid_offer}} merge
+          # token (renders literal bodies; skips no-value recipients).
 
       - name: Search oracle reference matcher (unit)
         run: npm run test:search-oracle
@@ -291,6 +293,14 @@ jobs:
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261015040000_my_leads_approved_snooze_multi_house.integration.test.ts
+
+      - name: Switchboard read view norma_lead_details (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261104120000_switchboard_read_norma_lead_details.integration.test.ts
 
       - name: My Leads classifier phase 2 perf body vs 20261020130000 baseline, parity across every classifier suite (disposable DB)
         env:

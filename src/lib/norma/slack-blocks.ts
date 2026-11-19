@@ -1,3 +1,4 @@
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import type { KnownBlock } from "@slack/types";
 
 import { NORMA_QUALIFICATION_DISPLAY } from "./outcome";
@@ -104,7 +105,5 @@ export function buildNormaSummaryFallbackText(input: Pick<NormaSlackSummaryInput
 
 /** Same base-URL resolution the existing Slack task links use. */
 export function buildNormaLeadDeepLink(propertyId: string, env: Record<string, string | undefined> = process.env): string {
-  const baseUrl = env.NEXT_PUBLIC_APP_URL ?? env.APP_URL ?? "https://sandra-sooty.vercel.app";
-  const normalized = baseUrl.startsWith("http") ? baseUrl : `https://${baseUrl}`;
-  return `${normalized.replace(/\/+$/, "")}/leads/${propertyId}`;
+  return buildLeadDeepLink(propertyId, { env });
 }

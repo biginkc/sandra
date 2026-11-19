@@ -38,9 +38,16 @@ const MULTIPLIERS: Record<string, number> = {
 const NUM = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?`;
 const AREA_AFTER = String.raw`(?!\s*(?:sq\b|sq\.|sqft|square|ft\b|feet|acre|acres|ac\b|mi\b|miles|%|percent|bed|bd\b|bath|ba\b|br\b|yrs?\b|years?\b))`;
 
+// "1500 K Street": a SPACED k followed by an unambiguous street word is an address, never
+// thousands. Only the spaced form is guarded: glued "150k" always was, and stays, an amount.
+const STREET_AFTER = String.raw`(?![\s-]+(?:st|streets?|ave|avenue|rd|road|blvd|ln|lane|hwy|highway)\b)`;
+
 const TOKEN_RE = new RegExp(
   String.raw`(?<![\w$.,])(\$\s?)?(${NUM})` + // optional $, number (not glued to a word or digit)
-    String.raw`(?:(k|mm|m|mil)\b|\s+(thousand|million|grand)\b|\s*(dollars|bucks|usd)\b)?` +
+    // One optional space before `k` only ("500 k"); m/mm/mil stay glued (minutes, miles).
+    String.raw`(?:(k|mm|m|mil)\b| (k)\b${STREET_AFTER}|\s+(thousand|million|grand)\b|\s*(dollars|bucks|usd)\b)?` +
+    // Never fall back to the bare number when a spaced "k" follows ("$2 k sq ft" is not $2).
+    String.raw`(?! ?k\b)` +
     AREA_AFTER +
     String.raw`(?!\w)`,
   "gi",
@@ -60,8 +67,8 @@ function toCents(n: number): number {
 function readTokens(text: string): Token[] {
   const tokens: Token[] = [];
   for (const m of text.matchAll(TOKEN_RE)) {
-    const [, dollar, body, glued, word, currency] = m;
-    const suffix = (glued ?? word ?? "").toLowerCase();
+    const [, dollar, body, glued, spacedK, word, currency] = m;
+    const suffix = (glued ?? spacedK ?? word ?? "").toLowerCase();
     const grouped = body.includes(",");
     const hasEvidence = Boolean(dollar) || Boolean(suffix) || Boolean(currency) || grouped;
     if (!hasEvidence) continue;

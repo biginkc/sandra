@@ -24,15 +24,27 @@ export async function seedSenderCatalog(
   serviceClient: SupabaseClient<Database>,
   orgId: string,
   phones: string[] = [MOCK_SENDER_PRIMARY],
-  opts: { provider?: string; status?: "active" | "inactive" } = {},
+  opts: {
+    provider?: string;
+    status?: "active" | "inactive";
+    /**
+     * Seed the provider-side attachment that makes a number "sendable"
+     * (messaging status Active + attached 10DLC campaign; multi-number plan
+     * §3.1). Default true, so campaign create/revive accept seeded senders.
+     */
+    sendable?: boolean;
+  } = {},
 ): Promise<void> {
   const nowIso = new Date().toISOString();
+  const sendable = opts.sendable ?? true;
   const { error } = await serviceClient.from("provider_sender_numbers").upsert(
     phones.map((phone) => ({
       org_id: orgId,
       provider: opts.provider ?? "mock",
       phone_e164: phone,
       status: opts.status ?? "active",
+      messaging_status: sendable ? "Active" : null,
+      attached_campaign: sendable ? "Mock 10DLC Campaign" : null,
       last_synced_at: nowIso,
       updated_at: nowIso,
     })),

@@ -406,9 +406,13 @@ function buildStatusUpdate(
         Boolean(nextErrorMessage) &&
         nextErrorMessage !== message.error_message;
       if (!shouldApplyTime && !shouldApplyError) return null;
-      const metadata = isProviderUnknownMessage(message)
-        ? clearProviderUnknownMetadata(message.metadata)
-        : undefined;
+      const metadata = withProviderRejection(
+        isProviderUnknownMessage(message)
+          ? clearProviderUnknownMetadata(message.metadata)
+          : undefined,
+        message.metadata,
+        timestamp,
+      );
       return {
         status: "failed",
         failed_at: shouldApplyTime ? timestamp : message.failed_at,
@@ -437,6 +441,29 @@ function clearProviderUnknownMetadata(
   const next = { ...metadata };
   delete next.providerOutcome;
   return next;
+}
+
+/**
+ * A `failed` status callback is a conclusive provider rejection. Record it
+ * explicitly: `providerAttempt` is kept for audit, and a failed status alone
+ * is not proof of rejection, so `is_possibly_submitted_sms` (SQL) reads this
+ * marker to stop treating the row as possibly submitted.
+ */
+function withProviderRejection(
+  cleared: MessageStatusUpdate["metadata"] | undefined,
+  original: MessageStatusRow["metadata"],
+  timestamp: string,
+): MessageStatusUpdate["metadata"] {
+  const base =
+    cleared && typeof cleared === "object" && !Array.isArray(cleared)
+      ? cleared
+      : original && typeof original === "object" && !Array.isArray(original)
+        ? original
+        : {};
+  return {
+    ...base,
+    providerRejection: { source: "status_callback", at: timestamp },
+  };
 }
 
 function parseStoredStatusEvent(row: WebhookEventRow): SmsStatusEvent {
