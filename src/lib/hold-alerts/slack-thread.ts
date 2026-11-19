@@ -16,11 +16,14 @@ export type ThreadLookup = { inboundId?: string | null; propertyId?: string | nu
 export const THREAD_MAX_MESSAGES = 10;
 export const THREAD_LOOKBACK_DAYS = 14;
 export const THREAD_BODY_MAX_CHARS = 500;
-/** Slack's blue, as the swatch before our own lines. */
-export const US_SWATCH_HEX = "#1264A3";
 
-/** Outbound rows that never reached the seller are not part of the conversation. */
-const UNSENT_OUTBOUND = new Set(["queued", "scheduled", "pending", "sending", "failed", "canceled", "cancelled", "undelivered"]);
+/**
+ * Only outbound rows that actually went out are part of the conversation. A
+ * positive list, so queued/paused/scheduled/failed (and any status added later)
+ * never show as something we said.
+ */
+const SENT_OUTBOUND = ["sent", "delivered"] as const;
+const SENT_OUTBOUND_SET: ReadonlySet<string> = new Set(SENT_OUTBOUND);
 const PHONE_RE = /^\+?\d{7,15}$/;
 
 type Row = { direction: string; body: string | null; created_at: string; status: string | null; from_address?: string | null };
@@ -40,6 +43,8 @@ export async function loadSlackThread(
   nowMs: number,
 ): Promise<ThreadMessage[]> {
   const sinceIso = new Date(nowMs - THREAD_LOOKBACK_DAYS * 86_400_000).toISOString();
+  const nowIso = new Date(nowMs).toISOString();
+  const sent = `status.in.(${SENT_OUTBOUND.join(",")})`;
   let phone: string | null = null;
   if (lookup.inboundId) {
     const { data, error } = await db
@@ -59,12 +64,16 @@ export async function loadSlackThread(
     .select(COLUMNS)
     .eq("org_id", orgId)
     .eq("channel", "sms")
-    .gte("created_at", sinceIso);
+    .gte("created_at", sinceIso)
+    .lte("created_at", nowIso)
+    .not("body", "is", null);
+  // Eligibility (sent outbound only, real direction) is filtered in the query, before the
+  // limit, so newer unsent rows can never crowd older real texts out of the last ten.
   query = phone
-    ? query.or(`and(direction.eq.inbound,from_address.eq."${phone}"),and(direction.eq.outbound,to_address.eq."${phone}")`)
-    : query.eq("property_id", lookup.propertyId);
-  // Fetch extra so dropping unsent outbound rows still leaves a full thread.
-  const { data, error } = await query.order("created_at", { ascending: false }).limit(THREAD_MAX_MESSAGES * 3);
+    ? query.or(`and(direction.eq.inbound,from_address.eq."${phone}"),and(direction.eq.outbound,to_address.eq."${phone}",${sent})`)
+    : query.eq("property_id", lookup.propertyId).or(`direction.eq.inbound,and(direction.eq.outbound,${sent})`);
+  // A little headroom for whitespace-only bodies, which the query can't exclude.
+  const { data, error } = await query.order("created_at", { ascending: false }).limit(THREAD_MAX_MESSAGES * 2);
   if (error) throw new Error(`thread lookup failed: ${error.message}`);
   return toThread((data ?? []) as Row[], nowMs);
 }
@@ -73,7 +82,7 @@ export async function loadSlackThread(
 export function toThread(rows: readonly Row[], nowMs: number): ThreadMessage[] {
   return rows
     .filter((r) => r.direction === "inbound" || r.direction === "outbound")
-    .filter((r) => !(r.direction === "outbound" && UNSENT_OUTBOUND.has(String(r.status ?? "").toLowerCase())))
+    .filter((r) => r.direction === "inbound" || SENT_OUTBOUND_SET.has(String(r.status ?? "").toLowerCase()))
     .filter((r) => Date.parse(r.created_at) <= nowMs)
     .filter((r) => (r.body ?? "").trim().length > 0)
     .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
@@ -105,7 +114,7 @@ export type SlackBlock = Record<string, any>;
 
 /**
  * One rich_text block: the headline (its name/address part a link, no URL line),
- * then one section per message. A blue swatch precedes our (US) lines only.
+ * then one section per message, labelled US or SELLER.
  * An empty thread yields just the linked headline.
  */
 export function buildSlackAlertBlocks(headline: SlackHeadline, thread: readonly ThreadMessage[], nowMs: number): SlackBlock[] {
@@ -117,7 +126,6 @@ export function buildSlackAlertBlocks(headline: SlackHeadline, thread: readonly 
   for (const m of thread.slice(-THREAD_MAX_MESSAGES)) {
     const label = `${m.direction === "outbound" ? "US" : "SELLER"} ${formatThreadTime(m.createdAt, nowMs)}: `;
     const elements: SlackBlock[] = [];
-    if (m.direction === "outbound") elements.push({ type: "color", value: US_SWATCH_HEX }, { type: "text", text: " " });
     elements.push({ type: "text", text: `${label}${threadBody(m.body)}` });
     sections.push({ type: "rich_text_section", elements });
   }

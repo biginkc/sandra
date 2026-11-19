@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { runHoldAlertsForOrg } from "./core";
+import { runHoldAlertsForOrg, SLACK_THREAD_TIMEOUT_MS, slackBlocks } from "./core";
 import { hotPromotionSlackHeadline, hotPromotionSlackText, hotPromotionSmsText, slackFirstHeadline, smsText } from "./messages";
-import { buildSlackAlertBlocks, formatThreadTime, toThread, type SlackBlock, type ThreadMessage } from "./slack-thread";
+import { buildSlackAlertBlocks, formatThreadTime, loadSlackThread, toThread, type SlackBlock, type ThreadMessage } from "./slack-thread";
 import { hold, makeDeps, ORG } from "./test-support";
 import type { HotPromotion } from "./types";
 
@@ -68,11 +68,10 @@ describe("thread lines", () => {
     msg("inbound", "What is   your\noffer?", "2026-11-18T19:44:00.000Z"),
   ];
 
-  it("US lines get a blue swatch, SELLER lines do not; oldest first; Chicago time", () => {
+  it("US / SELLER labels, no color element, oldest first, Chicago time", () => {
     const [, us, seller] = sections(buildSlackAlertBlocks(hotPromotionSlackHeadline(promo, URL_), thread, NOW));
-    expect((us.elements as SlackBlock[])[0]).toEqual({ type: "color", value: "#1264A3" });
-    expect(lineText(us)).toBe(" US 12:52 pm: Hi there, synthetic opener.\n");
-    expect((seller.elements as SlackBlock[]).some((e) => e.type === "color")).toBe(false);
+    expect(lineText(us)).toBe("US 12:52 pm: Hi there, synthetic opener.\n");
+    expect([us, seller].some((l) => (l.elements as SlackBlock[]).some((e) => e.type === "color"))).toBe(false);
     expect(lineText(seller)).toBe("SELLER 1:44 pm: What is your offer?");
   });
 
@@ -150,5 +149,52 @@ describe("core wiring", () => {
 
   it("hold SMS copy carries no thread", () => {
     expect(smsText(hold(), URL_)).not.toMatch(/SELLER|US \d/);
+  });
+});
+
+describe("only texts that actually went out", () => {
+  it("toThread drops paused (and any non-sent) outbound, keeps inbound", () => {
+    const rows = [
+      { direction: "outbound", body: "synthetic paused draft", created_at: new Date(NOW - 3000).toISOString(), status: "paused" },
+      { direction: "outbound", body: "synthetic scheduled", created_at: new Date(NOW - 2000).toISOString(), status: "scheduled" },
+      { direction: "outbound", body: "synthetic delivered", created_at: new Date(NOW - 1500).toISOString(), status: "delivered" },
+      { direction: "inbound", body: "synthetic reply", created_at: new Date(NOW - 1000).toISOString(), status: "received" },
+    ];
+    expect(toThread(rows, NOW).map((m) => m.body)).toEqual(["synthetic delivered", "synthetic reply"]);
+  });
+
+  it("loadSlackThread filters eligibility in the query, before the limit", async () => {
+    const calls: Array<[string, unknown[]]> = [];
+    let n = 0;
+    const builder: Record<string, unknown> = {};
+    for (const m of ["from", "select", "eq", "gte", "lte", "not", "or", "order", "limit", "maybeSingle"]) {
+      builder[m] = (...args: unknown[]) => {
+        calls.push([m, args]);
+        if (m === "maybeSingle") return Promise.resolve({ data: { from_address: "+15555550123" }, error: null });
+        if (m === "limit") return Promise.resolve({ data: [], error: null, n: n++ });
+        return builder;
+      };
+    }
+    await loadSlackThread(builder as never, "org-1", { inboundId: "in-1" }, NOW);
+    const or = calls.find(([m]) => m === "or")![1][0] as string;
+    expect(or).toContain('and(direction.eq.outbound,to_address.eq."+15555550123",status.in.(sent,delivered))');
+    expect(or).toContain('and(direction.eq.inbound,from_address.eq."+15555550123")');
+    expect(calls.some(([m, a]) => m === "lte" && a[0] === "created_at" && a[1] === new Date(NOW).toISOString())).toBe(true);
+    expect(calls.some(([m, a]) => m === "not" && a[0] === "body" && a[1] === "is" && a[2] === null)).toBe(true);
+    // Filters are applied before the limit (the limit is the last call).
+    expect(calls[calls.length - 1][0]).toBe("limit");
+  });
+});
+
+describe("thread lookup deadline", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("a stalled lookup sends the headline alone after the deadline", async () => {
+    vi.useFakeTimers();
+    const { deps } = makeDeps({ nowIso: "2026-11-18T20:00:00.000Z", loadSlackThread: () => new Promise(() => {}) });
+    const pending = slackBlocks(deps, ORG, hotPromotionSlackHeadline(promo, URL_), { inboundId: "in-1" });
+    await vi.advanceTimersByTimeAsync(SLACK_THREAD_TIMEOUT_MS + 1);
+    const blocks = await pending;
+    expect(sections(blocks)).toHaveLength(1);
   });
 });
