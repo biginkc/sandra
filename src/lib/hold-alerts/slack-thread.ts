@@ -159,24 +159,35 @@ export async function loadThreadWithDeadline(
   tags: Record<string, string>,
 ): Promise<ThreadMessage[]> {
   if (!load) return [];
+  return (await withSlackDeadline(Promise.resolve().then(load), [], tags)) ?? [];
+}
+
+/**
+ * Any Slack enrichment with the shared deadline. Never throws: an error or the
+ * deadline yields `fallback`. Wrap the WHOLE enrichment (every query it makes),
+ * so nothing can stall a send past SLACK_THREAD_TIMEOUT_MS.
+ */
+export async function withSlackDeadline<T>(work: Promise<T>, fallback: T, tags: Record<string, string>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const deadline = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), SLACK_THREAD_TIMEOUT_MS);
+    const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), SLACK_THREAD_TIMEOUT_MS);
     });
-    const loaded = await Promise.race([Promise.resolve().then(load), deadline]);
-    if (loaded === "timeout") {
+    const result = await Promise.race([work, deadline]);
+    if (result === TIMED_OUT) {
       reportError(new Error("Slack thread lookup timed out"), { tags });
-      return [];
+      return fallback;
     }
-    return loaded ?? [];
+    return result as T;
   } catch (error) {
     reportError(error, { tags });
-    return [];
+    return fallback;
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
+
+const TIMED_OUT: unique symbol = Symbol("slack_thread_timeout");
 
 /**
  * Thread blocks for a lead-related Slack DM (by property). [] when there is no

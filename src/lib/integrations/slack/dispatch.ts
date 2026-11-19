@@ -10,7 +10,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeTimeZone } from "@/lib/time/zoned";
 import { completeTask } from "@/lib/tasks";
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
-import { loadLeadThreadBlocks } from "@/lib/hold-alerts/slack-thread";
+import { loadLeadThreadBlocks, withSlackDeadline } from "@/lib/hold-alerts/slack-thread";
 
 import {
   buildAppointmentReminderBlocks,
@@ -432,6 +432,15 @@ export function buildAppointmentDeepLink(
  * the recent text thread. Never throws; any trouble = no link, no thread.
  */
 async function loadTaskLead(
+  admin: AdminClient,
+  taskId: string,
+  surface: string,
+): Promise<{ leadLink: string | null; threadBlocks: unknown[] }> {
+  // One deadline over the whole enrichment (task query + thread), so the send is never held past it.
+  return withSlackDeadline(loadTaskLeadUnbounded(admin, taskId, surface), { leadLink: null, threadBlocks: [] }, { surface });
+}
+
+async function loadTaskLeadUnbounded(
   admin: AdminClient,
   taskId: string,
   surface: string,

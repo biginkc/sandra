@@ -34,7 +34,10 @@ vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("@/lib/tasks", () => ({ completeTask }));
 vi.mock("@/lib/errors/report", () => ({ reportError }));
 const { loadLeadThreadBlocks } = vi.hoisted(() => ({ loadLeadThreadBlocks: vi.fn() }));
-vi.mock("@/lib/hold-alerts/slack-thread", () => ({ loadLeadThreadBlocks }));
+vi.mock("@/lib/hold-alerts/slack-thread", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/hold-alerts/slack-thread")>("@/lib/hold-alerts/slack-thread");
+  return { ...actual, loadLeadThreadBlocks };
+});
 vi.mock("@slack/web-api", () => ({
   WebClient: function MockWebClient(token: string, options?: unknown) {
     webClientConstructor(token, options);
@@ -52,6 +55,7 @@ import {
   dispatchTaskAssignedSlack,
   refreshSlackMessage,
 } from "./dispatch";
+import { SLACK_THREAD_TIMEOUT_MS } from "@/lib/hold-alerts/slack-thread";
 
 type SelectRow = Record<string, unknown> | null;
 type SupabaseMockOptions = {
@@ -168,6 +172,28 @@ describe("slack/dispatch", () => {
       createAdminClient.mockReturnValue(makeSupabase({ taskRow: leadTask }));
       loadLeadThreadBlocks.mockRejectedValue(new Error("db down"));
       await expect(dispatchTaskAssignedSlack(dispatchInput)).resolves.toMatchObject({ sent: true });
+    });
+
+    it("a stalled task lookup can't hold the send past the shared deadline", async () => {
+      vi.useFakeTimers();
+      try {
+        const db = makeSupabase({ taskRow: leadTask });
+        const from = db.from.bind(db);
+        db.from = (table: string) => {
+          const b = from(table);
+          if (table === "tasks") b.maybeSingle = vi.fn(() => new Promise<never>(() => {}));
+          return b;
+        };
+        createAdminClient.mockReturnValue(db);
+        const pending = dispatchTaskAssignedSlack(dispatchInput);
+        await vi.advanceTimersByTimeAsync(SLACK_THREAD_TIMEOUT_MS + 1);
+        await expect(pending).resolves.toMatchObject({ sent: true });
+        const arg = chatPostMessage.mock.calls[0][0];
+        expect(JSON.stringify(arg.blocks)).not.toContain("/leads/");
+        expect(loadLeadThreadBlocks).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("appointment reminder appends the thread; outcome unchanged", async () => {
