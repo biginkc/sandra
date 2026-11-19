@@ -196,6 +196,7 @@ export default defineConfig({
       "supabase/migrations/20261031140000_routing_v2_model_stop_release_hold.integration.test.ts",
       "supabase/migrations/20261031140300_routing_v2_model_stop_release_obligations.integration.test.ts",
       "supabase/migrations/20261104120000_switchboard_read_norma_lead_details.integration.test.ts",
+      "supabase/migrations/20261119120000_switchboard_read_norma_interested_since.integration.test.ts",
       "src/lib/ai-responder/nurture-auto-drip.db.integration.test.ts",
       "src/lib/ai-responder/nine-questions.dispatch.integration.test.ts",
       "src/lib/ai-responder/routing-v2.dispatch.integration.test.ts",
