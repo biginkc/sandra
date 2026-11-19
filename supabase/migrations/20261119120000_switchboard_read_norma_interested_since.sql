@@ -94,7 +94,7 @@ begin
       from public.lead_events e
      where e.org_id = %1$L::uuid
        and ((e.event_type = 'status_changed' and e.payload ->> 'to' = 'interested')
-         or (e.event_type = 'my_leads_workflow' and e.payload ->> 'operation' = 'ready_acquisition_offer'))
+            or (e.event_type = 'my_leads_workflow' and e.payload ->> 'operation' = 'ready_acquisition_offer'))
      group by e.property_id
   $view$, v_org);
 

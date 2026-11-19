@@ -192,8 +192,9 @@ describe("20261119120000 switchboard_read.norma_interested_since", () => {
   });
 
   it("view body is the Switchboard definition once the org literal is normalised", async () => {
-    // Switchboard pins md5(pg_get_viewdef) for its production org; with a random test org the md5 differs, so compare the
-    // definition with the org literal swapped back to a placeholder.
+    // Switchboard 1ba6835 pins md5(pg_get_viewdef) = 23f8c5521245117ad155d68ee6168c12, computed with the production org
+    // id, which the operator passes at run time (psql -v org_id) and is not in either repo. With a random test org the md5
+    // differs, so compare the definition with the org literal swapped back to a placeholder.
     const { rows } = await db.query<{ def: string }>(
       "select replace(pg_get_viewdef('switchboard_read.norma_interested_since'::regclass), $1, '<org>') as def",
       [orgA],
@@ -207,6 +208,46 @@ describe("20261119120000 switchboard_read.norma_interested_since", () => {
         "  GROUP BY property_id;",
       ].join("\n"),
     );
+  });
+
+  it("re-running Switchboard's statements (biginkc/Switchboard 1ba6835) after this migration changes nothing", async () => {
+    // Copied verbatim from Switchboard db/sandra/0001_switchboard_read.sql at 1ba683572eb168fac757aaca4f0169e1ba1b9311:
+    // the owner grant/policy loop body (for lead_events), the view statement, the owner change and the reader grant.
+    const switchboardAt1ba6835 = `do $sb$
+declare
+  v_org uuid := '${orgA}';
+  v_table text := 'lead_events';
+begin
+    execute format('revoke all on public.%I from switchboard_read_owner', v_table);
+    execute format('grant select on public.%I to switchboard_read_owner', v_table);
+    execute format('drop policy if exists switchboard_read_owner_select on public.%I', v_table);
+    execute format('create policy switchboard_read_owner_select on public.%I for select to switchboard_read_owner using (%I = %L::uuid)',
+      v_table, case v_table when 'organizations' then 'id' else 'org_id' end, v_org);
+  execute format($view$
+    create or replace view switchboard_read.norma_interested_since with (security_barrier = true) as
+    select e.property_id::uuid as property_id,
+           max(e.created_at)::timestamptz as interested_at
+      from public.lead_events e
+     where e.org_id = %1$L::uuid
+       and ((e.event_type = 'status_changed' and e.payload ->> 'to' = 'interested')
+            or (e.event_type = 'my_leads_workflow' and e.payload ->> 'operation' = 'ready_acquisition_offer'))
+     group by e.property_id
+  $view$, v_org);
+  alter view switchboard_read.norma_interested_since owner to switchboard_read_owner;
+  grant select on switchboard_read.norma_interested_since to sandra_switchboard_reader;
+end
+$sb$`;
+    const md5Sql = "select md5(pg_get_viewdef('switchboard_read.norma_interested_since'::regclass)) as m";
+    await db.query("savepoint sb");
+    try {
+      const before = (await db.query(STATE_SQL)).rows[0];
+      const md5Before = (await db.query(md5Sql)).rows[0].m;
+      await db.query(switchboardAt1ba6835);
+      expect((await db.query(md5Sql)).rows[0].m).toBe(md5Before);
+      expect((await db.query(STATE_SQL)).rows[0]).toEqual(before);
+    } finally {
+      await db.query("rollback to savepoint sb");
+    }
   });
 
   it("refuses to run when the owner policies disagree on the org", async () => {
