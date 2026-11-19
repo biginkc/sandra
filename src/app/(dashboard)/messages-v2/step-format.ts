@@ -16,7 +16,7 @@ export function readJevScores(
   detail: Record<string, unknown> | null,
   limit = 3,
 ): JevScore[] {
-  if (!detail) return [];
+  if (!detail || "shadow_engine" in detail) return [];
   const out: JevScore[] = [];
   // The bridge writes Jev's full distribution as `probabilities`
   // (src/lib/sms-classification/dispatch-bridge.ts, "classify" step).

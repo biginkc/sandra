@@ -232,3 +232,29 @@ describe("RunCard undo", () => {
     expect(held.find).not.toHaveBeenCalled();
   });
 });
+
+describe("RunCard routing v2 stop undo", () => {
+  const stopStep = (result: PipelineRunStep["result"]) => [step(1, { kind: "action", name: "routing_v2_stop", result })];
+  const label = undefined;
+  it("offers Undo for an automatic model_stop suppression and lifts it by suppression id", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    const controls = { find: vi.fn(async () => "sup-1"), undo: vi.fn(async () => ({ ok: true as const })) };
+    render(<RunCard run={baseRun({ steps: stopStep("applied") })} label={label} stopUndoControls={controls} />);
+    await userEvent.click(await screen.findByTestId("undo-jev-action"));
+    expect(controls.find).toHaveBeenCalledWith("m1");
+    expect(controls.undo).toHaveBeenCalledWith("sup-1");
+    expect(await screen.findByTestId("undo-done")).toBeInTheDocument();
+  });
+  it("shows the lift's own refusal (carrier STOP / DNC stay blocked)", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    const controls = { find: vi.fn(async () => "sup-1"), undo: vi.fn(async () => ({ ok: false as const, message: "This number was opted out another way, so it stays blocked." })) };
+    render(<RunCard run={baseRun({ steps: stopStep("applied") })} label={label} stopUndoControls={controls} />);
+    await userEvent.click(await screen.findByTestId("undo-jev-action"));
+    expect(await screen.findByTestId("undo-error")).toHaveTextContent(/stays blocked/);
+  });
+  it("no button for a stop that only held for a person", () => {
+    const controls = { find: vi.fn(async () => "sup-1"), undo: vi.fn() };
+    render(<RunCard run={baseRun({ steps: stopStep("skipped") })} label={label} stopUndoControls={controls} />);
+    expect(controls.find).not.toHaveBeenCalled();
+  });
+});

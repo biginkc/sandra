@@ -18,6 +18,7 @@ export const KNOWN_VARIABLES = new Set([
   "market",
   "my_first_name",
   "company_name",
+  "rapid_offer",
 ]);
 
 export type SeedRow = {

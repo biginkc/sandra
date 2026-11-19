@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveEffectiveHomeownerContactId } from "@/lib/leads/effective-homeowner";
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { assertPropertyDncUnlocked } from "@/lib/dnc/property-lock";
@@ -76,7 +77,11 @@ export async function sendSmsFromLeadStamped(
         error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
       };
     }
-    if (!property.homeowner_contact_id) {
+    const homeownerContactId = await resolveEffectiveHomeownerContactId(supabase, {
+      propertyId,
+      homeownerContactId: property.homeowner_contact_id,
+    });
+    if (!homeownerContactId) {
       return {
         ok: false,
         error: {
@@ -94,7 +99,7 @@ export async function sendSmsFromLeadStamped(
       : null;
     const outcome = await sendSmsToContact(supabase, {
       origin: "manual",
-      contactId: property.homeowner_contact_id,
+      contactId: homeownerContactId,
       propertyId,
       body: trimmed,
       from: from ?? undefined,

@@ -366,15 +366,37 @@ export function useWorkQueue(options: UseWorkQueueOptions): UseWorkQueueResult {
     runReadRef.current = runRead;
   }, [runRead]);
 
-  /** Timer / visibility entry point: respects hidden tab and paused composers. */
+  /**
+   * Timer / visibility / due-time entry point: respects hidden tab and paused composers. Only one background read
+   * (page plus its facts) runs at a time; ticks that land meanwhile collapse into one trailing run, which goes back
+   * through this gate (visibility, pause) and is dropped if the member changed, since that reload already ran.
+   */
+  const bgInFlight = useRef(false);
+  const bgTrailing = useRef(false);
+  const tickRef = useRef<() => void>(() => {});
   const tick = useCallback(() => {
     if (document.hidden || pausedRef.current) {
       missedWhilePaused.current = true;
       return;
     }
     missedWhilePaused.current = false;
-    void runRead();
+    if (bgInFlight.current) {
+      bgTrailing.current = true;
+      return;
+    }
+    bgInFlight.current = true;
+    const member = memberRef.current;
+    void runRead().finally(() => {
+      bgInFlight.current = false;
+      if (!bgTrailing.current) return;
+      bgTrailing.current = false;
+      if (memberRef.current === member) tickRef.current();
+    });
   }, [runRead]);
+
+  useEffect(() => {
+    tickRef.current = tick;
+  }, [tick]);
 
   // Scope change: reset everything and reload. Keeps the committed search (the container owns it).
   const prevMember = useRef(memberId);

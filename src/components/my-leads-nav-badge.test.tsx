@@ -58,4 +58,19 @@ describe("MyLeadsNavBadge", () => {
     rerender(<MyLeadsNavBadge initialCount={7} />);
     expect(screen.getByTestId("my-leads-badge")).toHaveTextContent("7");
   });
+
+  it("shares one badge read per focus event across desktop and mobile badges", async () => {
+    const onRefresh = vi.fn(async () => ({ ok: true as const, count: 9 }));
+    render(
+      <>
+        <MyLeadsNavBadge initialCount={2} onRefresh={onRefresh} />
+        <MyLeadsNavBadge initialCount={2} onRefresh={onRefresh} />
+      </>,
+    );
+
+    window.dispatchEvent(new Event("focus"));
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(screen.getAllByTestId("my-leads-badge").map((el) => el.textContent)).toEqual(["9", "9"]));
+    expect(onRefresh).toHaveBeenCalledOnce();
+  });
 });

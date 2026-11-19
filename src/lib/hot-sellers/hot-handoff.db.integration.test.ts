@@ -280,8 +280,8 @@ describe("assignHotLeadToOwner (real database)", () => {
     expect(picked).toEqual({ status: "assigned", assigneeUserId: first });
   });
 
-  it("never takes a lead already owned by another member", async () => {
-    const { orgId } = await oneOwnerOrg("owned");
+  it("never takes a lead already owned by another member, but records one hot_text alert to Jarrad", async () => {
+    const { orgId, owner } = await oneOwnerOrg("owned");
     const member = await createMember(orgId, "member");
     const propertyId = await createProperty(orgId, { assignedTo: member });
     const inbound = await insertInbound(orgId, propertyId);
@@ -291,6 +291,33 @@ describe("assignHotLeadToOwner (real database)", () => {
     expect(result).toEqual({ status: "owned_by_someone_else", ownerUserId: member });
     expect(await assignedColumn(propertyId)).toBe(member);
     expect(await handoffEvents(propertyId)).toHaveLength(0);
+    const texts = await hotTextEvents(propertyId);
+    expect(texts).toHaveLength(1);
+    expect(texts[0]!.payload).toMatchObject({ to: owner, held_lead: true, lead_owner: member });
+  });
+
+  it("an existing lead assigned to another user gets a hot reply: Jarrad is alerted; a duplicate of that inbound adds no second alert", async () => {
+    const { orgId, owner } = await oneOwnerOrg("owned-dup");
+    const member = await createMember(orgId, "member");
+    const propertyId = await createProperty(orgId, { assignedTo: member });
+    expect((await admin.from("properties").update({ status: "new_lead" } as never).eq("id", propertyId)).error).toBeNull();
+    const inbound = await insertInbound(orgId, propertyId);
+
+    await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound });
+    await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound });
+
+    expect(await assignedColumn(propertyId)).toBe(member);
+    expect(await hotTextEvents(propertyId)).toHaveLength(1);
+    const promos = await alertLoaderFor(orgId);
+    expect(promos.map((p) => [p.kind, p.assigneeUserId, p.heldLead])).toEqual([["hot_text", owner, true]]);
+  });
+
+  it("an unassigned prospect is still handed to Jarrad and alerted", async () => {
+    const { orgId, owner } = await oneOwnerOrg("unassigned-ok");
+    const propertyId = await createProperty(orgId);
+    const inbound = await insertInbound(orgId, propertyId);
+    expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inbound })).toEqual({ status: "assigned", assigneeUserId: owner });
+    expect((await alertLoaderFor(orgId)).map((p) => p.kind)).toEqual(["handoff"]);
   });
 
   async function hotTextEvents(propertyId: string) {
@@ -388,7 +415,7 @@ describe("assignHotLeadToOwner (real database)", () => {
     void owner;
   });
 
-  it("(b) a rep wins the race: owned_by_someone_else, no assigned event; a later human assignment to Jarrad + a NEW inbound is already_owned (hot_text), never a hand-off", async () => {
+  it("(b) a rep wins the race: owned_by_someone_else, no assigned event, one hot_text alert to Jarrad; a later human assignment to Jarrad + a NEW inbound is already_owned (hot_text), never a hand-off", async () => {
     const { orgId, owner } = await oneOwnerOrg("race-lost");
     const rep = await createMember(orgId, "member");
     const propertyId = await createProperty(orgId);
@@ -402,8 +429,8 @@ describe("assignHotLeadToOwner (real database)", () => {
     }
     expect(await assignedColumn(propertyId)).toBe(rep);
     expect(await handoffEvents(propertyId)).toHaveLength(0);
-    expect(await hotTextEvents(propertyId)).toHaveLength(0);
-    expect(await alertLoaderFor(orgId)).toEqual([]);
+    expect(await hotTextEvents(propertyId)).toHaveLength(1);
+    expect((await alertLoaderFor(orgId)).map((p) => p.kind)).toEqual(["hot_text"]);
 
     // A person later gives it to Jarrad; a NEW hot inbound is a hot text, not a hand-off.
     const { error } = await admin.from("properties").update({ assigned_user_id: owner }).eq("id", propertyId);
@@ -411,8 +438,8 @@ describe("assignHotLeadToOwner (real database)", () => {
     const inboundB = await insertInbound(orgId, propertyId);
     expect(await assignHotLeadToOwner(admin, propertyId, { inboundMessageId: inboundB })).toEqual({ status: "already_owned", assigneeUserId: owner });
     expect(await handoffEvents(propertyId)).toHaveLength(0);
-    expect(await hotTextEvents(propertyId)).toHaveLength(1);
-    expect((await alertLoaderFor(orgId)).map((p) => p.kind)).toEqual(["hot_text"]);
+    expect(await hotTextEvents(propertyId)).toHaveLength(2);
+    expect((await alertLoaderFor(orgId)).map((p) => p.kind)).toEqual(["hot_text", "hot_text"]);
   });
 
   it("(c) an OPEN HOT hold covers the hand-off: assigned with covered_by_hold:true, and the alert loader skips it (no second ping)", async () => {

@@ -25,7 +25,11 @@ type RawPlan = { "Node Type": string; "Actual Total Time": number; "Actual Loops
  * literals, and rank plan nodes by exclusive time (own time x loops minus children), labelled with their CTE / relation.
  */
 export async function explainClassifier(db: Client, org: string, member: string, at: string): Promise<PlanNode[]> {
-  const def = (await db.query("select prosrc from pg_proc where oid = 'public.my_leads_work_classified(uuid,uuid,timestamptz)'::regprocedure")).rows[0].prosrc as string;
+  // Since 20261021090000 the body lives in plpgsql my_leads_work_classified_ids (RETURN QUERY ...; p_ids null = whole queue).
+  const ids = (await db.query("select prosrc from pg_proc where oid = to_regprocedure('public.my_leads_work_classified_ids(uuid,uuid,timestamptz,uuid[])')")).rows[0]?.prosrc as string | undefined;
+  const def = ids
+    ? ids.replace(/^[\s\S]*?\breturn query\s*/i, "").replace(/;\s*end;\s*$/i, "").replace(/\bp_ids\b/g, "null::uuid[]")
+    : (await db.query("select prosrc from pg_proc where oid = 'public.my_leads_work_classified(uuid,uuid,timestamptz)'::regprocedure")).rows[0].prosrc as string;
   const body = def.replace(/\bp_org\b/g, `'${org}'::uuid`).replace(/\bp_member\b/g, `'${member}'::uuid`).replace(/\bp_at\b/g, `'${at}'::timestamptz`).trim().replace(/;\s*$/, "");
   const plan = (await db.query(`explain (analyze, format json) ${body}`)).rows[0]["QUERY PLAN"][0].Plan as RawPlan;
   const out: PlanNode[] = [];

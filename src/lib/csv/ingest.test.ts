@@ -147,7 +147,7 @@ function makeSupabase() {
           p_source_identity?: string;
         },
       ) => {
-        if (name === "upsert_assigns_property_contact") {
+        if (name === "upsert_assigns_property_contact" || name === "upsert_dealmachine_property_contact") {
           calls.push({
             table: "property_contacts",
             op: "upsert",
@@ -1675,5 +1675,28 @@ describe("processIngestChunk atomic property outcome replay", () => {
         sourceId: "prop-boundary",
       }),
     ]);
+  });
+});
+
+
+describe("DealMachine source-person ingestion", () => {
+  it("persists the complete person and job relation without nominating a homeowner", async () => {
+    responseQueue = [
+      { data: null, error: null }, { data: { id: "prop-dm" }, error: null },
+      { data: null, error: null }, { data: null, error: null },
+    ];
+    const source = { internal_person_id: "person-1", person_full_name: "Pat Sample", phone_1: "4175550100", people_phone_1_type_id: "Wireless", is_phone_1_dnc: "Yes", email_address_2: "secondary@example.com" };
+    const result = await processIngestChunk(makeSupabase() as never, {
+      jobId: "job-dm", csvImportId: "import-dm", orgId: "org-1", source: "dealmachine", market: "Christian County MO", countyId: null,
+      mapping: { address: "Address", state: "State", dealmachine_person_id: "Person", dealmachine_source_row: "Source" },
+      rows: [{Address:"123 Main St", State:"MO", Person:"person-1", Source:JSON.stringify(source)}],
+      offset:0, autoTagIds:[], listId:null, userId:null,
+    });
+    expect(result.failed).toBe(0);
+    const relation = calls.find(c=>c.table === "property_contacts")?.insertPayload as Record<string, unknown>;
+    expect(relation.p_source_attributes).toEqual(source);
+    expect(relation.p_contact).toMatchObject({do_not_contact:true,phone_1:"+14175550100"});
+    expect(calls.filter(c=>c.table === "csv_import_contact_outcomes")).toHaveLength(1);
+    expect(calls.find(c=>c.table === "properties" && c.op === "insert")?.insertPayload).toMatchObject({homeowner_contact_id:null});
   });
 });

@@ -1,6 +1,7 @@
 "use server";
 
 import { reportError } from "@/lib/errors/report";
+import { timeServerAction } from "@/lib/perf/server-action-log";
 import {
   getAcquisitionKpis,
   MyLeadsReadError,
@@ -44,6 +45,10 @@ async function resolveViewer(): Promise<{ viewer: MyLeadsViewer; off: boolean }>
 }
 
 export async function loadWorkPage(input: { memberId: string; query: WorkQuery }): Promise<LoadWorkPageResult> {
+  return timeServerAction("loadWorkPage", () => loadWorkPageInner(input));
+}
+
+async function loadWorkPageInner(input: { memberId: string; query: WorkQuery }): Promise<LoadWorkPageResult> {
   try {
     const { viewer, off } = await resolveViewer();
     if (off) return FEATURE_OFF;
@@ -54,6 +59,10 @@ export async function loadWorkPage(input: { memberId: string; query: WorkQuery }
 }
 
 export async function loadWorkFacts(input: { memberId: string; ids: string[] }): Promise<LoadWorkFactsResult> {
+  return timeServerAction("loadWorkFacts", () => loadWorkFactsInner(input));
+}
+
+async function loadWorkFactsInner(input: { memberId: string; ids: string[] }): Promise<LoadWorkFactsResult> {
   try {
     const { viewer, off } = await resolveViewer();
     if (off) return FEATURE_OFF;

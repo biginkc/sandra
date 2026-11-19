@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE } from "@/lib/hot-sellers/assign";
 
-import { runHoldAlertsForOrg } from "./core";
+import { MAX_DMS_PER_RECIPIENT_PER_HOUR, MAX_SMS_PER_HOUR, runHoldAlertsForOrg } from "./core";
 import { HOT_ALERT_LOOKBACK_MS, loadHotPromotions } from "./index";
 import { FakeStore, makeDeps, ORG, OWNER } from "./test-support";
 
@@ -319,12 +319,12 @@ describe("loadHotPromotions: keys and assignee guard", () => {
     expect(promotions.map((p) => p.key)).toEqual(["hot_handoff:in-1"]);
   });
 
-  it("drops a hand-off whose property is now assigned to someone else (or nobody); hot texts are not dropped", async () => {
+  it("keeps a hand-off whose property is now assigned to someone else (or nobody): assignment never gates a hot alert", async () => {
     const hand = events(3);
     const text = events(1, { sourceType: HOT_TEXT_SOURCE_TYPE }).map((e) => ({ ...e, id: "t0", property_id: "prop-t", source_id: "in-t" }));
     const { db } = fakeDb([...hand, ...text], { assignees: { "prop-0": "rep-1", "prop-1": null, "prop-t": "rep-1" } });
     const { promotions } = await loadHotPromotions(db, ORG, MARK, NOW_MS);
-    expect(promotions.map((p) => p.propertyId).sort()).toEqual(["prop-2", "prop-t"]);
+    expect(promotions.map((p) => p.propertyId).sort()).toEqual(["prop-0", "prop-1", "prop-2", "prop-t"]);
   });
 });
 
@@ -332,7 +332,7 @@ describe("hot promotions through the alert pass", () => {
   const storeRowsAsDeliveries = (store: FakeStore) => () =>
     store.rows.map((r) => ({ hold_key: r.holdKey, channel: r.channel, status: r.status, attempts: r.attempts }));
 
-  it("250 promotions: every one gets exactly one Slack and one SMS across passes (SMS cap 10/hr, DM cap 20/hr), none twice", async () => {
+  it("250 promotions: every one gets exactly one Slack and one SMS across passes (hourly SMS and DM caps), none twice", async () => {
     const holder: { store?: FakeStore } = {};
     const { db } = fakeDb(events(250), { deliveries: () => storeRowsAsDeliveries(holder.store!)() });
     const t = makeDeps({ holds: [], recipients: [OWNER], nowIso: "2026-10-15T12:00:00.000Z" });
@@ -355,7 +355,7 @@ describe("hot promotions through the alert pass", () => {
     expect(t.sent.filter((s) => s.channel !== "email")).toHaveLength(500);
   });
 
-  it("5,100 events across clock-advance passes (SMS cap 10/hr): all alerted exactly once, none twice, nothing left pending", async () => {
+  it("5,100 events across clock-advance passes (hourly SMS cap): all alerted exactly once, none twice, nothing left pending", async () => {
     const clock = { now: new Date(NOW_MS) };
     const store = new IndexedStore(() => clock.now);
     const { db } = fakeDb(events(5100), { deliveries: () => storeRowsAsDeliveries(store)() });
@@ -406,9 +406,20 @@ describe("hot promotions through the alert pass", () => {
     expect(loaded.promotions).toHaveLength(301);
     expect(loaded.promotions[0]!.propertyId).toBe("prop-newest");
 
+    // Ordering under pressure: one slot left on each cap this hour, so only the first-ordered promotion gets it.
+    const recent = "2026-10-15T11:50:00.000Z";
+    for (const [channel, n] of [["sms", MAX_SMS_PER_HOUR - 1], ["slack", MAX_DMS_PER_RECIPIENT_PER_HOUR - 1]] as const) {
+      for (let i = 0; i < n; i++) {
+        t.store.rows.push({
+          id: `cap-${channel}-${i}`, orgId: ORG, propertyId: null, holdKey: `cap-seed:${channel}:${i}`, recipientUserId: OWNER.userId,
+          channel, stage: "first", status: "sent", attempts: 1, lastError: null, createdAt: recent, sentAt: recent,
+        });
+      }
+    }
     t.store.watermarks.set(ORG, "2026-10-13T00:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
-    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(10); // cap
+    expect(t.sent.filter((s) => s.channel === "sms")).toHaveLength(1);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
     const newestRows = t.store.rows.filter((r) => r.holdKey === "hot_handoff:in-newest");
     expect(newestRows.map((r) => [r.channel, r.status]).sort()).toEqual([["slack", "sent"], ["sms", "sent"]]);
   });

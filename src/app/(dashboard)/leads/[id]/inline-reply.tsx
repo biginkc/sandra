@@ -11,7 +11,7 @@ import { renderTemplate } from "@/lib/templates/render";
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 import { TemplatePicker } from "@/app/(dashboard)/templates/template-picker";
 
-import { loadLeadVars } from "../actions";
+import { loadLeadVars } from "../load-lead-vars";
 import { sendSmsFromLeadStamped } from "../send-sms-stamped";
 
 type Props = {

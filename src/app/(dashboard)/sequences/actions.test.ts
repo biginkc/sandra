@@ -42,6 +42,7 @@ import {
   enrollLeadInSequence,
   pauseEnrollmentAction,
   resumeEnrollmentAction,
+  replaceSequenceSteps,
   restoreSequence,
   updateSequence,
 } from "./actions";
@@ -481,5 +482,104 @@ describe("lead sequence lifecycle actions", () => {
       ok: false,
       error: { code: "UNAUTHENTICATED" },
     });
+  });
+});
+
+describe("replaceSequenceSteps voicemail drop voice", () => {
+  const scriptStep = {
+    step_index: 0, delay_after_previous_minutes: 0, action_type: "send_voicemail_drop" as const,
+    template_body: null, template_id: null, template_category: null, target_status: null,
+    vm_media_id: null, vm_tts_body: "Hi {{first_name}}", vm_voice_id: null, vm_phone_line_id: "line-1",
+  };
+  function adminClient() {
+    const rpc = vi.fn().mockResolvedValue({ data: ["step-1"], error: null });
+    const client = {
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u1", email: "admin@bmhgroupkc.com" } }, error: null }) },
+      rpc,
+      from: vi.fn(() => { throw new Error("unexpected table access"); }),
+    };
+    createClient.mockResolvedValue(client);
+    return client;
+  }
+
+  it("rejects a script step with no voice and no default, before the RPC", async () => {
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "");
+    const client = adminClient();
+    const result = await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [scriptStep] });
+    expect(result).toEqual({ ok: false, error: { code: "VALIDATION", message: expect.stringMatching(/needs a voice/) } });
+    expect(client.rpc).not.toHaveBeenCalled();
+  });
+
+  it("saves the default voice onto a script step that has none", async () => {
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "voice-default");
+    const client = adminClient();
+    const result = await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [scriptStep] });
+    expect(result.ok).toBe(true);
+    expect(client.rpc).toHaveBeenCalledWith("sequence_replace_steps", expect.objectContaining({
+      p_steps: [expect.objectContaining({ vm_voice_id: "voice-default" })],
+    }));
+  });
+
+  it("keeps a step's own voice and lets recordings save without any voice", async () => {
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "");
+    const client = adminClient();
+    const steps = [
+      { ...scriptStep, vm_voice_id: "voice-own" },
+      { ...scriptStep, step_index: 1, vm_tts_body: null, vm_media_id: "media-1" },
+    ];
+    client.rpc.mockResolvedValue({ data: ["s1", "s2"], error: null });
+    const result = await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps });
+    expect(result.ok).toBe(true);
+    expect(client.rpc.mock.calls[0][1].p_steps[0].vm_voice_id).toBe("voice-own");
+    expect(client.rpc.mock.calls[0][1].p_steps[1].vm_voice_id).toBeNull();
+  });
+
+  it("saves a rotation step with the default voice and only its group", async () => {
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "voice-default");
+    const client = adminClient();
+    const rotation = { ...scriptStep, vm_tts_body: null, vm_template_category: "Group A" };
+    const result = await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [rotation] });
+    expect(result.ok).toBe(true);
+    expect(client.rpc.mock.calls[0][1].p_steps[0]).toMatchObject({ vm_template_category: "Group A", vm_voice_id: "voice-default" });
+  });
+
+  it("rejects a rotation step with no voice, and one that also has a script", async () => {
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "");
+    const client = adminClient();
+    const rotation = { ...scriptStep, vm_tts_body: null, vm_template_category: "Group A" };
+    expect((await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [rotation] })).ok).toBe(false);
+    vi.stubEnv("DROPCOWBOY_VOICE_ID", "voice-default");
+    const both = { ...scriptStep, vm_template_category: "Group A" };
+    expect((await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [both] })).ok).toBe(false);
+    expect(client.rpc).not.toHaveBeenCalled();
+  });
+
+  it("rejects a rotation group on an SMS step", async () => {
+    const client = adminClient();
+    const sms = { ...scriptStep, action_type: "send_sms" as const, template_body: "Hi", vm_tts_body: null, vm_phone_line_id: null,
+      vm_template_category: "Group A" };
+    expect((await replaceSequenceSteps({ sequenceId: "seq-1", name: "Drip", description: null, steps: [sms] })).ok).toBe(false);
+    expect(client.rpc).not.toHaveBeenCalled();
+  });
+});
+
+describe("routing v2 drips are not editable from the editor", () => {
+  it("maps the DB lock to a plain message", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: "ROUTING_V2_DRIP_LOCKED: routing v2 drip steps are edited by migration only" },
+    });
+    createClient.mockResolvedValue({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u1", email: "admin@bmhgroupkc.com" } }, error: null }) },
+      rpc,
+      from: vi.fn(() => { throw new Error("unexpected table access"); }),
+    });
+    const step = {
+      step_index: 0, delay_after_previous_minutes: 0, action_type: "send_sms" as const,
+      template_body: "Hi", template_id: null, template_category: null, target_status: null,
+      vm_media_id: null, vm_tts_body: null, vm_voice_id: null, vm_phone_line_id: null,
+    };
+    const result = await replaceSequenceSteps({ sequenceId: "seq-v2", name: "Drip", description: null, steps: [step] });
+    expect(result).toEqual({ ok: false, error: { code: "ROUTING_V2_DRIP_LOCKED", message: expect.stringMatching(/can't be edited here/) } });
   });
 });

@@ -65,8 +65,8 @@ describe("buildPreviewBlocks", () => {
       elements: [{
         type: "button",
         action_id: "open_my_leads",
-        text: { type: "plain_text", text: "Open in My Leads" },
-        url: "https://sandra.bmhgroupkc.com/my-leads?lead=abcdefab-cdef-4abc-8def-abcdefabcdef",
+        text: { type: "plain_text", text: "Open lead in Sandra" },
+        url: "https://sandra.bmhgroupkc.com/leads/abcdefab-cdef-4abc-8def-abcdefabcdef",
       }],
     });
   });
@@ -234,7 +234,7 @@ describe("buildPreviewBlocks", () => {
 describe("canonicalPreviewUrl", () => {
   it("uses the exact lowercase canonical My Leads target", () => {
     expect(canonicalPreviewUrl(PROPERTY)).toBe(
-      "https://sandra.bmhgroupkc.com/my-leads?lead=abcdefab-cdef-4abc-8def-abcdefabcdef",
+      "https://sandra.bmhgroupkc.com/leads/abcdefab-cdef-4abc-8def-abcdefabcdef",
     );
   });
 });

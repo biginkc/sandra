@@ -56,6 +56,7 @@ import {
 
 import { listTemplates } from "../../templates/actions";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { resolveEffectiveHomeownerContactId } from "@/lib/leads/effective-homeowner";
 import { renderTemplate } from "@/lib/templates/render";
 import { AiAttentionBanner } from "./ai-attention-banner";
 import { AiResponderToggle } from "./ai-responder-toggle";
@@ -98,6 +99,11 @@ import { LeadMediaHero } from "./lead-media-hero";
 import { LeadMediaImageSlot } from "./lead-media-image-slot";
 import {loadLeadAcquisitionHistory} from "./acquisition-history-actions";
 import { LeadActivityTimeline } from "./lead-activity";
+import {
+  VOICEMAIL_DROP_TIMELINE_COLUMNS,
+  visibleVoicemailDrops,
+  type VoicemailDropTimelineRow,
+} from "@/lib/sequences/voicemail-drop-step-config";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
 import { HaveNormaCallButton } from "./have-norma-call-button";
@@ -214,6 +220,31 @@ export default async function LeadDetailPage({
   }
 
   const lead = data as DetailedLead;
+  if (!lead.homeowner) {
+    // Newer imports link people only through property_contacts; fall back to
+    // whoever texted in, else the first linked person, so the lead is workable.
+    const fallbackContactId = await resolveEffectiveHomeownerContactId(supabase, {
+      propertyId: lead.id,
+      homeownerContactId: null,
+    }).catch((fallbackError: unknown) => {
+      console.error("[leads] homeowner fallback failed", fallbackError);
+      return null;
+    });
+    if (fallbackContactId) {
+      const { data: fallbackHomeowner, error: fallbackHomeownerError } = await supabase
+        .from("contacts")
+        .select("*, homeowner_details!homeowner_details_contact_org_fkey(*)")
+        .eq("id", fallbackContactId)
+        .maybeSingle();
+      if (fallbackHomeownerError) {
+        console.error("[leads] homeowner fallback contact read failed", {
+          message: fallbackHomeownerError.message,
+          code: fallbackHomeownerError.code,
+        });
+      }
+      lead.homeowner = (fallbackHomeowner as DetailedLead["homeowner"]) ?? null;
+    }
+  }
   // One request-captured instant keeps every appointment action boundary
   // stable between server render and client hydration.
   // eslint-disable-next-line react-hooks/purity -- this async Server Component intentionally serializes one request instant to the client
@@ -405,6 +436,18 @@ export default async function LeadDetailPage({
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(200);
+  // Read-only voicemail drop log (RLS: org members). A read failure only
+  // hides drops from the timeline.
+  const voicemailDropsPromise = Promise.resolve(
+    supabase
+      .from("voicemail_drops")
+      .select(VOICEMAIL_DROP_TIMELINE_COLUMNS)
+      .eq("property_id", lead.id)
+      .order("created_at", { ascending: false })
+      .limit(50),
+  )
+    .then(({ data, error }) => (error ? [] : visibleVoicemailDrops((data ?? []) as VoicemailDropTimelineRow[])))
+    .catch(() => [] as VoicemailDropTimelineRow[]);
   const normaRequestsPromise = supabase
     .from("norma_call_requests")
     .select(NORMA_REQUEST_VIEW_COLUMNS)
@@ -683,6 +726,7 @@ export default async function LeadDetailPage({
     viewerPrefs,
   ] = settledCoreReads;
   const inlinePhoneSuppressionResult = await inlineSmsPhoneSuppressionPromise;
+  const initialVoicemailDrops = await voicemailDropsPromise;
   // loadIntegrationPrefs supplies the persisted timezone when available and
   // keeps the historical Chicago fallback for unset or invalid preferences.
   const viewerTimezone = viewerPrefs?.timezone ?? "America/Chicago";
@@ -1129,6 +1173,7 @@ export default async function LeadDetailPage({
               initialCalls={initialCallRows}
               initialEvents={initialLeadEvents}
               initialAcquisitionHistory={acquisitionHistory}
+              initialVoicemailDrops={initialVoicemailDrops}
               messageError={threadError?.message ?? null}
               noteError={notesError?.message ?? null}
               callError={callRollupError?.message ?? null}

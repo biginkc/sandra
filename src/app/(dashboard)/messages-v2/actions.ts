@@ -7,6 +7,7 @@ import { resolveApprovedTemplateReply } from "@/lib/ai-responder/template-reply"
 import { undoJevAction as undoJevActionCore } from "@/lib/ai-responder/undo";
 import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import { liftModelStopSuppression as liftModelStopSuppressionCore } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
 import type { TeamMember } from "@/lib/auth/team-member";
 import { err, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
@@ -284,6 +285,64 @@ export async function findJevUndoAction(inboundMessageId: string): Promise<strin
     return data?.id ?? null;
   } catch (e) {
     reportError(e, { tags: { surface: "messages_v2_find_jev_undo" }, extra: { inboundMessageId: id } });
+    return null;
+  }
+}
+
+/**
+ * Routing v2 PR-I undo: lifts an automatic `model_stop` phone suppression. Audited in the
+ * database (routing_v2_model_stop_events). Carrier STOP, DNC and human-confirmed
+ * suppressions are refused there and stay in force.
+ */
+export async function liftModelStopSuppression(suppressionId: string): Promise<Result<{ status: "lifted" | "already_lifted" }>> {
+  const auth = await authorize();
+  if (!auth.ok) return auth;
+  const id = String(suppressionId ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) {
+    return err({ code: "VALIDATION", message: "Invalid suppression id" });
+  }
+  try {
+    const supabase = await createClient();
+    const result = await liftModelStopSuppressionCore(supabase, id);
+    if (!result.ok) return err({ code: result.code, message: result.message });
+    revalidatePath("/messages-v2");
+    return { ok: true, data: { status: result.status } };
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_lift_model_stop" }, extra: { suppressionId: id } });
+    return err({ code: "FAILED", message: "Could not undo. Try again." });
+  }
+}
+
+/** The still-liftable `model_stop` suppression written for an inbound message, or null. */
+export async function findModelStopSuppression(inboundMessageId: string): Promise<string | null> {
+  const auth = await authorize();
+  if (!auth.ok) return null;
+  const id = String(inboundMessageId ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  try {
+    const supabase = await createClient();
+    const loose = supabase as unknown as LooseSupabase;
+    const { data, error } = await loose
+      .from("routing_v2_model_stop_events")
+      .select("suppression_id")
+      .eq("inbound_message_id", id)
+      .eq("org_id", auth.data.orgId)
+      .eq("action", "suppressed")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const suppressionId = (data as { suppression_id?: string | null } | null)?.suppression_id ?? null;
+    if (!suppressionId) return null;
+    const { data: row, error: rowError } = await loose
+      .from("sms_phone_suppressions")
+      .select("id")
+      .eq("id", suppressionId)
+      .eq("org_id", auth.data.orgId)
+      .eq("source", "model_stop")
+      .maybeSingle();
+    if (rowError) throw new Error(rowError.message);
+    return (row as { id?: string } | null)?.id ?? null;
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_find_model_stop" }, extra: { inboundMessageId: id } });
     return null;
   }
 }

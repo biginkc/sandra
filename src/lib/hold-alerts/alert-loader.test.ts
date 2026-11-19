@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fakePostgrest } from "@/app/(dashboard)/messages-v2/fake-postgrest.test-util";
 import { loadMessagesV2Data as pageLoader } from "@/app/(dashboard)/messages-v2/queries";
@@ -65,6 +65,9 @@ const db = (tables: Record<string, Row[]>) =>
   }).client;
 
 describe("hold-alert cron reads holds with the exact pre-#874 loader", () => {
+  // The fixtures are anchored to NOW; wall-clock drift must not age them out.
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(NOW); });
+  afterEach(() => vi.useRealTimers());
   it("alert-loader.ts is the parent's queries.ts byte for byte (apart from its header and the ./types import path)", () => {
     const src = readFileSync(join(__dirname, "alert-loader.ts"), "utf8");
     const body = src.slice(src.indexOf("*/\n") + 3).replace('from "@/app/(dashboard)/messages-v2/types";', 'from "./types";');

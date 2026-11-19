@@ -87,6 +87,8 @@ export function classifyDialpadRecordingRpcError(
     case '22023':
       return { kind: 'invalid_input', detail };
     case '40001':
+    // 20261021130000: recording conflicts raise DPR01 (non-retryable; PostgREST retries 40001 forever).
+    case 'DPR01':
       return { kind: 'conflict', detail };
     case '55000':
       return { kind: 'state', detail };

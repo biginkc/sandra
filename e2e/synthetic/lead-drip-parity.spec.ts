@@ -9,7 +9,7 @@ test.beforeAll(async () => {
     "navigation": `export const useRouter=()=>({refresh:()=>${backend}.refresh(),push(){}});`,
     "link": "export default function Link({children,...props}) { return <a {...props}>{children}</a>; }",
     "dispo": `export const setInboxDispoAndStartDrip=(...args)=>${backend}.startWithOutcome(...args); export const setOutreachDispo=async()=>({ok:true}); export const moveMessageThreadToLead=async()=>({ok:true});`,
-    "sequences": `export const listDripChoices=async()=>({ok:true,data:[{id:'synthetic-drip',name:'Confirmed owner',textCount:11,days:30,firstSend:'Tomorrow'}]}); export const startDripForLeads=(...args)=>${backend}.startDirect(...args); export const changeDripAction=async()=>({ok:false,error:{message:'Unexpected switch'}}); export const cancelEnrollment=async()=>({ok:true}); export const pauseEnrollmentAction=cancelEnrollment; export const resumeEnrollmentAction=cancelEnrollment; export const retrySequenceStepAction=cancelEnrollment;`,
+    "sequences": `export const fetchDripChoices=()=>listDripChoices(); export const listDripChoices=async()=>({ok:true,data:[{id:'synthetic-drip',name:'Confirmed owner',textCount:11,days:30,firstSend:'Tomorrow'}]}); export const startDripForLeads=(...args)=>${backend}.startDirect(...args); export const changeDripAction=async()=>({ok:false,error:{message:'Unexpected switch'}}); export const cancelEnrollment=async()=>({ok:true}); export const pauseEnrollmentAction=cancelEnrollment; export const resumeEnrollmentAction=cancelEnrollment; export const retrySequenceStepAction=cancelEnrollment;`,
     "progress": `export const listDripProgress=async()=>${backend}.state.progress?[${backend}.state.progress]:[];`,
     "supabase": "export const createClient=()=>({});",
     "appointments": "export const BookAppointmentPopover=()=>null;",
@@ -22,7 +22,7 @@ test.beforeAll(async () => {
     plugins: [{ name: "offline-drip-boundaries", setup(build) {
       const bind = (filter: RegExp, key: string) => build.onResolve({ filter }, () => ({path:key, namespace:"offline"}));
       bind(/^next\/navigation$/, "navigation"); bind(/^next\/link$/, "link");
-      bind(/messages\/dispo-actions$/, "dispo"); bind(/sequences\/actions$/, "sequences");
+      bind(/messages\/dispo-actions$/, "dispo"); bind(/sequences\/actions$/, "sequences"); bind(/sequences\/drip-choices-client$/, "sequences");
       bind(/sequences\/drip-progress$/, "progress"); bind(/supabase\/client$/, "supabase");
       bind(/book-appointment-popover$/, "appointments"); bind(/errors\/call-action$/, "call-action");
       build.onLoad({filter:/.*/, namespace:"offline"}, (args) => ({contents:modules[args.path],loader:"tsx",resolveDir:process.cwd()}));

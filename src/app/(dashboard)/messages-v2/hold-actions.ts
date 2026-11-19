@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { resolveSafetyObligationsByPerson } from "@/lib/ai-responder/safety-obligations";
 import { HOSTILE_NEEDS_CONFIRM_REASON, confirmDncInboundId, isConfirmDncReason } from "@/lib/ai-responder/hostile";
 import type { HumanDraftSendInput, HumanDraftSendResult } from "@/lib/ai-responder/dispatch";
 import { err, ok, type Result } from "@/lib/errors/result";
@@ -267,6 +268,8 @@ async function performSend(
     },
   ];
   try {
+    // Round 18: the person's action resolves the lead's routing v2 safety obligations first.
+    await resolveSafetyObligationsByPerson(d.admin as never, draft.property_id);
     const { data: cleared, error } = await d.admin
       .from("properties")
       .update({
@@ -670,6 +673,7 @@ export async function confirmDoNotContact(
     const now = new Date().toISOString();
     const events: HoldEvent[] = [];
     try {
+      await resolveSafetyObligationsByPerson(d.admin as never, input.propertyId);
       const { data: cleared, error } = await d.admin
         .from("properties")
         .update({ needs_human_attention: false, last_ai_escalation_reason: null, last_ai_escalation_at: null, updated_at: now })

@@ -1015,6 +1015,7 @@ export type Database = {
         Row: {
           active: boolean
           business_hours_only: boolean
+          classifier_engine: string
           classifier_fallback_max_consecutive: number
           classifier_mode: string
           classifier_provider: string
@@ -1041,6 +1042,7 @@ export type Database = {
         Insert: {
           active?: boolean
           business_hours_only?: boolean
+          classifier_engine?: string
           classifier_fallback_max_consecutive?: number
           classifier_mode?: string
           classifier_provider?: string
@@ -1067,6 +1069,7 @@ export type Database = {
         Update: {
           active?: boolean
           business_hours_only?: boolean
+          classifier_engine?: string
           classifier_fallback_max_consecutive?: number
           classifier_mode?: string
           classifier_provider?: string
@@ -1556,6 +1559,51 @@ export type Database = {
             columns: ["call_activity_id"]
             isOneToOne: false
             referencedRelation: "call_activities"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      campaign_sender_numbers: {
+        Row: {
+          campaign_id: string
+          created_at: string
+          org_id: string
+          paused_at: string | null
+          phone_e164: string
+          position: number
+          provider: string
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string
+          org_id: string
+          paused_at?: string | null
+          phone_e164: string
+          position: number
+          provider: string
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string
+          org_id?: string
+          paused_at?: string | null
+          phone_e164?: string
+          position?: number
+          provider?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaign_sender_numbers_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_sender_numbers_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]
@@ -3687,16 +3735,19 @@ export type Database = {
           created_at: string
           id: string
           name: string
+          sendillo_brand_name: string | null
         }
         Insert: {
           created_at?: string
           id?: string
           name: string
+          sendillo_brand_name?: string | null
         }
         Update: {
           created_at?: string
           id?: string
           name?: string
+          sendillo_brand_name?: string | null
         }
         Relationships: []
       }
@@ -4363,6 +4414,8 @@ export type Database = {
       }
       provider_sender_numbers: {
         Row: {
+          attached_brand: string | null
+          attached_campaign: string | null
           created_at: string
           id: string
           last_synced_at: string
@@ -4376,6 +4429,8 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          attached_brand?: string | null
+          attached_campaign?: string | null
           created_at?: string
           id?: string
           last_synced_at?: string
@@ -4389,6 +4444,8 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          attached_brand?: string | null
+          attached_campaign?: string | null
           created_at?: string
           id?: string
           last_synced_at?: string
@@ -4638,6 +4695,11 @@ export type Database = {
           template_body: string | null
           template_category: string | null
           template_id: string | null
+          vm_media_id: string | null
+          vm_phone_line_id: string | null
+          vm_template_category: string | null
+          vm_tts_body: string | null
+          vm_voice_id: string | null
         }
         Insert: {
           action_type: string
@@ -4650,6 +4712,11 @@ export type Database = {
           template_body?: string | null
           template_category?: string | null
           template_id?: string | null
+          vm_media_id?: string | null
+          vm_phone_line_id?: string | null
+          vm_template_category?: string | null
+          vm_tts_body?: string | null
+          vm_voice_id?: string | null
         }
         Update: {
           action_type?: string
@@ -4662,6 +4729,11 @@ export type Database = {
           template_body?: string | null
           template_category?: string | null
           template_id?: string | null
+          vm_media_id?: string | null
+          vm_phone_line_id?: string | null
+          vm_template_category?: string | null
+          vm_tts_body?: string | null
+          vm_voice_id?: string | null
         }
         Relationships: [
           {
@@ -4814,6 +4886,92 @@ export type Database = {
             columns: ["template_id"]
             isOneToOne: false
             referencedRelation: "sms_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sms_sender_assignments: {
+        Row: {
+          assigned_at: string
+          org_id: string
+          provider: string
+          seller_phone_e164: string
+          sender_phone_e164: string
+          source: string
+          source_campaign_id: string | null
+          source_message_id: string | null
+        }
+        Insert: {
+          assigned_at?: string
+          org_id: string
+          provider: string
+          seller_phone_e164: string
+          sender_phone_e164: string
+          source: string
+          source_campaign_id?: string | null
+          source_message_id?: string | null
+        }
+        Update: {
+          assigned_at?: string
+          org_id?: string
+          provider?: string
+          seller_phone_e164?: string
+          sender_phone_e164?: string
+          source?: string
+          source_campaign_id?: string | null
+          source_message_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_sender_assignments_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_sender_assignments_source_campaign_id_fkey"
+            columns: ["source_campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sms_sender_settings: {
+        Row: {
+          admission_paused_at: string | null
+          allocation_enabled: boolean
+          default_sender_phone: string | null
+          org_id: string
+          pinning_enabled: boolean
+          pinning_enabled_at: string | null
+          updated_at: string
+        }
+        Insert: {
+          admission_paused_at?: string | null
+          allocation_enabled?: boolean
+          default_sender_phone?: string | null
+          org_id: string
+          pinning_enabled?: boolean
+          pinning_enabled_at?: string | null
+          updated_at?: string
+        }
+        Update: {
+          admission_paused_at?: string | null
+          allocation_enabled?: boolean
+          default_sender_phone?: string | null
+          org_id?: string
+          pinning_enabled?: boolean
+          pinning_enabled_at?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_sender_settings_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: true
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]
@@ -6576,6 +6734,202 @@ export type Database = {
           },
         ]
       }
+      voicemail_drops: {
+        Row: {
+          attempt_outcome: string
+          audio_kind: string
+          completed_at: string | null
+          contact_id: string | null
+          cost: number | null
+          created_at: string
+          drop_id: string | null
+          enrollment_id: string | null
+          id: string
+          idempotency_key: string
+          org_id: string
+          proof_url: string | null
+          proof_url_at: string | null
+          proof_storage_path: string | null
+          proof_content_type: string | null
+          proof_size_bytes: number | null
+          proof_fetched_at: string | null
+          proof_copy_status: string | null
+          proof_copy_attempts: number
+          proof_copy_next_at: string | null
+          proof_copy_error: string | null
+          property_id: string | null
+          provider: string
+          provider_payload: Json | null
+          queued_at: string | null
+          reason: string | null
+          reason_code: string | null
+          rendered_script: string | null
+          status: string
+          step_run_id: string
+          to_phone: string
+        }
+        Insert: {
+          attempt_outcome?: string
+          audio_kind: string
+          completed_at?: string | null
+          contact_id?: string | null
+          cost?: number | null
+          created_at?: string
+          drop_id?: string | null
+          enrollment_id?: string | null
+          id?: string
+          idempotency_key: string
+          org_id: string
+          proof_url?: string | null
+          proof_url_at?: string | null
+          proof_storage_path?: string | null
+          proof_content_type?: string | null
+          proof_size_bytes?: number | null
+          proof_fetched_at?: string | null
+          proof_copy_status?: string | null
+          proof_copy_attempts?: number
+          proof_copy_next_at?: string | null
+          proof_copy_error?: string | null
+          property_id?: string | null
+          provider: string
+          provider_payload?: Json | null
+          queued_at?: string | null
+          reason?: string | null
+          reason_code?: string | null
+          rendered_script?: string | null
+          status?: string
+          step_run_id: string
+          to_phone: string
+        }
+        Update: {
+          attempt_outcome?: string
+          audio_kind?: string
+          completed_at?: string | null
+          contact_id?: string | null
+          cost?: number | null
+          created_at?: string
+          drop_id?: string | null
+          enrollment_id?: string | null
+          id?: string
+          idempotency_key?: string
+          org_id?: string
+          proof_url?: string | null
+          proof_url_at?: string | null
+          proof_storage_path?: string | null
+          proof_content_type?: string | null
+          proof_size_bytes?: number | null
+          proof_fetched_at?: string | null
+          proof_copy_status?: string | null
+          proof_copy_attempts?: number
+          proof_copy_next_at?: string | null
+          proof_copy_error?: string | null
+          property_id?: string | null
+          provider?: string
+          provider_payload?: Json | null
+          queued_at?: string | null
+          reason?: string | null
+          reason_code?: string | null
+          rendered_script?: string | null
+          status?: string
+          step_run_id?: string
+          to_phone?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voicemail_drops_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_enrollment_id_fkey"
+            columns: ["enrollment_id"]
+            isOneToOne: false
+            referencedRelation: "sequence_enrollments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "leads_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "leads_unskip_traced"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "voicemail_drops_step_run_id_fkey"
+            columns: ["step_run_id"]
+            isOneToOne: true
+            referencedRelation: "sequence_step_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      voicemail_templates: {
+        Row: {
+          category: string
+          content: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          id: string
+          name: string
+          org_id: string
+          updated_at: string
+        }
+        Insert: {
+          category: string
+          content: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          name: string
+          org_id: string
+          updated_at?: string
+        }
+        Update: {
+          category?: string
+          content?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          name?: string
+          org_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voicemail_templates_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       available_esign_templates: {
@@ -6895,6 +7249,47 @@ export type Database = {
       fn_list_ambiguous_native_calls: { Args: { p_org_id: string }; Returns: Json }
       fn_assign_native_call_to_lead: { Args: { p_org_id: string; p_provider_call_id: string; p_property_id: string }; Returns: Json }
       fn_claim_dialpad_artifact_fetches: { Args: { p_limit?: number; p_lease_seconds?: number; p_artifacts?: string[] }; Returns: Json }
+      add_campaign_sender_numbers: {
+        Args: { p_campaign_id: string; p_phones: string[] }
+        Returns: {
+            campaign_id: string
+            created_at: string
+            org_id: string
+            paused_at: string | null
+            phone_e164: string
+            position: number
+            provider: string
+          }[]
+      }
+      admin_reassign_sms_sender: {
+        Args: { p_org_id: string; p_sender_phone: string; p_seller_phone: string }
+        Returns: undefined
+      }
+      admit_sms_submission: {
+        Args: { p_from: string; p_org_id: string; p_seller_phone: string }
+        Returns: string
+      }
+      adopt_sms_sender_assignments: {
+        Args: { p_after_phone?: string | null; p_limit?: number; p_org_id: string }
+        Returns: {
+          seller_phone: string
+          sender_phone: string | null
+          source: string | null
+          status: string
+        }[]
+      }
+      campaign_kpis_by_sender: {
+        Args: { p_campaign_id: string }
+        Returns: {
+          delivered: number
+          failed: number
+          from_address: string | null
+          queued: number
+          repliers: number
+          sent_no_receipt: number
+          sent_total: number
+        }[]
+      }
       fn_record_dialpad_artifact_result: {
         Args: { p_id: string; p_outcome: string; p_error?: string; p_text?: string; p_language?: string; p_summary?: string }
         Returns: Json
@@ -6963,6 +7358,39 @@ export type Database = {
           attempt_outcome: string
           authorized: boolean
           reason: string | null
+        }[]
+      }
+      is_possibly_submitted_sms: {
+        Args: { p_metadata: Json; p_status: string }
+        Returns: boolean
+      }
+      is_sendable_sender: {
+        Args: { p_org_id: string; p_phone: string; p_provider: string }
+        Returns: boolean
+      }
+      preview_sms_sender_conflicts: {
+        Args: { p_org_id: string }
+        Returns: {
+          expected_sender: string | null
+          kind: string
+          message_id: string | null
+          sender_phone: string | null
+          seller_phone: string
+        }[]
+      }
+      resolve_sms_sender: {
+        Args: {
+          p_allow_default?: boolean
+          p_campaign_id?: string | null
+          p_commitment_sender?: string | null
+          p_org_id: string
+          p_requested_sender?: string | null
+          p_seller_phone: string
+        }
+        Returns: {
+          sender_phone: string | null
+          source: string | null
+          status: string
         }[]
       }
       retry_sequence_step: {
@@ -7921,6 +8349,18 @@ export type Database = {
         }
         Returns: string
       }
+      set_campaign_sender_paused: {
+        Args: { p_campaign_id: string; p_paused: boolean; p_phone: string }
+        Returns: {
+            campaign_id: string
+            created_at: string
+            org_id: string
+            paused_at: string | null
+            phone_e164: string
+            position: number
+            provider: string
+          }
+      }
       soft_delete_esign_template: {
         Args: {
           p_actor_id: string
@@ -8507,6 +8947,17 @@ export type Database = {
           property_id: string
         }[]
       }
+      upsert_dealmachine_property_contact: {
+        Args: {
+          p_contact: Json
+          p_org_id: string
+          p_property_id: string
+          p_source_attributes: Json
+          p_source_identity: string
+          p_source_position: number
+        }
+        Returns: string
+      }
       upsert_assigns_property_contact: {
         Args: {
           p_contact: Json
@@ -8728,6 +9179,7 @@ export type Database = {
       enqueue_slack_unfurl_event: { Args: { p_app_id: string; p_channel_id: string | null; p_denial_code?: string | null; p_event_id: string; p_event_time: string | null; p_event_type: string; p_installation_id: string | null; p_installation_version: number | null; p_message_ts: string | null; p_org_id: string | null; p_poster_slack_user_id: string | null; p_team_id: string; p_url_keys: string[] }; Returns: { accepted: boolean; duplicate: boolean; job_id: string | null }[] }
       guard_slack_unfurl_dispatch: { Args: { p_channel_id: string; p_claim_token: string; p_installation_id: string; p_installation_version: number; p_job_id: string; p_org_id: string; p_poster_slack_user_id: string }; Returns: boolean }
       finish_slack_unfurl_job: { Args: { p_claim_token: string; p_error_code?: string | null; p_job_id: string; p_status: string }; Returns: boolean }
+      get_voicemail_drop_reached_attempt_facts: { Args: { p_org_id: string; p_property_id: string }; Returns: { call_activity_id: string; occurred_at: string }[] }
       get_slack_preview_attempt_facts: { Args: { p_org_id: string; p_property_id: string }; Returns: { latest_attempt_id: string | null; latest_attempt_occurred_at: string | null; latest_attempt_outcome: string | null; reached_call_id: string | null; reached_call_occurred_at: string | null }[] }
       get_slack_installation: { Args: { p_app_id: string; p_key: string; p_org_id: string; p_team_id: string }; Returns: { app_id: string; bot_token: string; bot_user_id: string; installation_id: string; installation_version: number; org_id: string; scopes: string[]; status: string; team_id: string; team_name: string | null }[] }
       revoke_slack_channel_approval: { Args: { p_app_id: string; p_channel_id: string; p_reason: string; p_team_id: string }; Returns: number }

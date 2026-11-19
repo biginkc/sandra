@@ -31,6 +31,11 @@ const mocks = vi.hoisted(() => ({
   optOut: vi.fn(async () => undefined),
   applyKeyword: vi.fn(async (..._a: unknown[]) => ({ escalated: false }) as unknown),
   checkHot: vi.fn(async (..._a: unknown[]) => undefined),
+  scheduleShadow: vi.fn((..._a: unknown[]) => undefined),
+}));
+
+vi.mock("@/lib/sms-classification/routing-v2/shadow", () => ({
+  scheduleRoutingV2Shadow: mocks.scheduleShadow,
 }));
 
 vi.mock("@/lib/messaging/opt-out-phone", async (importOriginal) => ({
@@ -425,6 +430,52 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
     );
   });
 
+  it("routing v2 shadow: scheduled only AFTER the inline terminal stamp, with the live outcome and inbound ids", async () => {
+    const order: string[] = [];
+    mocks.markState.mockImplementation((async (_s: unknown, _id: unknown, patch: { aiResponder?: { outcome?: string } }) => {
+      if (patch?.aiResponder) order.push(`stamp:${patch.aiResponder.outcome}`);
+    }) as never);
+    mocks.scheduleShadow.mockImplementationOnce(() => {
+      order.push("shadow");
+    });
+    mocks.dispatchAi.mockResolvedValueOnce({ outcome: "sent", messageId: "out-1", confidence: 0.9 } as never);
+    const response = await runWebhook();
+    expect(response.status).toBe(200);
+    expect(order).toEqual(["stamp:sent", "shadow"]);
+    expect((mocks.scheduleShadow.mock.calls[0] as unknown[])[1]).toEqual({
+      propertyId: "property-1",
+      contactId: "contact-1",
+      conversationId: "conversation-1",
+      inboundMessageId: "message-1",
+      inboundBody: INPUT.body,
+      liveOutcome: "sent",
+    });
+    mocks.markState.mockImplementation(async () => undefined);
+  });
+
+  it("routing v2 shadow: when the retry cannot be scheduled, the terminal escalation is shadowed after its stamp", async () => {
+    const order: string[] = [];
+    mocks.markState.mockImplementation((async (_s: unknown, _id: unknown, patch: { aiResponder?: { outcome?: string } }) => {
+      if (patch?.aiResponder) order.push(`stamp:${patch.aiResponder.outcome}`);
+    }) as never);
+    mocks.scheduleShadow.mockImplementationOnce(() => {
+      order.push("shadow");
+    });
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
+    await runWebhook();
+    expect(order).toEqual(["stamp:escalated", "shadow"]);
+    expect(mocks.scheduleShadow).toHaveBeenCalledTimes(1);
+    expect((mocks.scheduleShadow.mock.calls[0] as unknown[])[1]).toMatchObject({ inboundMessageId: "message-1", liveOutcome: "escalated" });
+    mocks.markState.mockImplementation(async () => undefined);
+  });
+
+  it("routing v2 shadow: a retry outcome is not shadowed inline (the delay workflow shadows its terminal outcome)", async () => {
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    await runWebhook();
+    expect(mocks.scheduleShadow).not.toHaveBeenCalled();
+  });
+
   it("an immediate silent exit stamps skipped:rule_<n> (not bare skipped), and a redelivery then skips dispatch", async () => {
     mocks.dispatchAi.mockResolvedValueOnce({ outcome: "skipped", reason: "already_answered" } as never);
     await runWebhook();
@@ -521,7 +572,7 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price", "how much", "lawyer"], jevAutomatic: true });
     mocks.computeDelay.mockReturnValueOnce(10);
     mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
-    mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:legal_contract" });
+    mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:legal_contract", flagOk: true });
     await runWebhook();
     expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: true }));
     expect(mocks.checkHot).toHaveBeenCalledTimes(1);
@@ -544,10 +595,100 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
     mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), jevAutomatic: false });
     mocks.computeDelay.mockReturnValueOnce(10);
     mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false } });
-    mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:price_offer" });
+    mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:price_offer", flagOk: true });
     await runWebhook();
     expect(mocks.applyKeyword).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ jevAutomatic: false }));
     expect(mocks.checkHot).not.toHaveBeenCalled();
+  });
+
+  describe("keyword hold NOT written (flagOk: false; Fable N-B / Opus N1)", () => {
+    async function runCapturing() {
+      const handler = handlerClient([{ data: INSERTED, error: null }]);
+      const eventUpdates: Array<Record<string, unknown>> = [];
+      const claimUpdates: Array<Record<string, unknown>> = [];
+      const from = handler.client.from;
+      const client = {
+        from: vi.fn((table: string) => {
+          if (table === "ai_response_claims") {
+            return {
+              select: vi.fn(() => query({ data: [], error: null })),
+              update: vi.fn((v: Record<string, unknown>) => {
+                claimUpdates.push(v);
+                const b = query({ data: null, error: null });
+                (b as Record<string, unknown>).neq = vi.fn(() => b);
+                return b;
+              }),
+            };
+          }
+          if (table !== "webhook_events") return from(table);
+          return {
+            insert: vi.fn(() => query({ data: { id: "event-1" }, error: null })),
+            update: vi.fn((v: Record<string, unknown>) => { eventUpdates.push(v); return query({ data: [{ id: "event-1" }], error: null }); }),
+          };
+        }),
+      };
+      mocks.serviceClient = client;
+      process.env.TEST_SUPABASE_URL = "http://example.test";
+      process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+      const response = await handleInboundWebhook(
+        new Request("https://example.test/api/webhooks/sendillo/sms", { method: "POST", headers: { host: "example.test" }, body: "{}" }),
+        { includeFullUrl: true, provider: provider() as never },
+      );
+      return { response, statuses: eventUpdates.map((u) => u.processing_status), claimUpdates };
+    }
+    const escalatedStamps = () => (mocks.markState.mock.calls as unknown as Array<[unknown, string, { aiResponder?: { outcome?: string } }]>)
+      .filter((c) => c[2]?.aiResponder?.outcome === "escalated");
+
+    it("Jev automatic + mixed price/legal text: the hot-text check still runs, the text is not stamped escalated, the event is marked error (never processed), the intent stays incomplete and the webhook answers 500", async () => {
+      mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price", "how much", "lawyer"], jevAutomatic: true });
+      mocks.computeDelay.mockReturnValueOnce(10);
+      mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false, org_id: "org-1" } });
+      mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:legal_contract", flagOk: false });
+      const { response, statuses, claimUpdates } = await runCapturing();
+      expect(response.status).toBe(500);
+      expect(mocks.checkHot).toHaveBeenCalledTimes(1);
+      expect(mocks.checkHot.mock.calls[0][2]).toBe("keyword:legal_contract");
+      // Astra B1: the hot check is told the hold failed, so it completes its own claim straight
+      // into the sweep-recoverable failure state; the webhook never repairs a claim afterwards.
+      expect(mocks.checkHot.mock.calls[0][6]).toEqual({ holdFailed: true });
+      expect(claimUpdates).toEqual([]);
+      expect(escalatedStamps()).toEqual([]);
+      expect(mocks.recordThread).not.toHaveBeenCalled();
+      expect(statuses).toContain("error");
+      expect(statuses).not.toContain("processed");
+      expect(mocks.markComplete).not.toHaveBeenCalled();
+      expect(mocks.startWorkflow).not.toHaveBeenCalled();
+      expect(mocks.dispatchAi).not.toHaveBeenCalled();
+    });
+
+    it("non-Jev config: no hot check (as when the hold lands), still not stamped and the webhook answers 500", async () => {
+      mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), jevAutomatic: false });
+      mocks.computeDelay.mockReturnValueOnce(10);
+      mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false, org_id: "org-1" } });
+      mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:needs_person", flagOk: false });
+      const { response, statuses } = await runCapturing();
+      expect(response.status).toBe(500);
+      expect(mocks.checkHot).not.toHaveBeenCalled();
+      expect(escalatedStamps()).toEqual([]);
+      expect(statuses).toEqual(expect.arrayContaining(["error"]));
+      expect(statuses).not.toContain("processed");
+    });
+
+    it("control: the same text whose hold lands is stamped escalated, marked processed and answers 200", async () => {
+      mocks.loadDelayConfig.mockResolvedValueOnce({ ...delayConfig(45), escalationKeywords: ["price", "how much", "lawyer"], jevAutomatic: true });
+      mocks.computeDelay.mockReturnValueOnce(10);
+      mocks.preGates.mockResolvedValueOnce({ ok: true, property: { ai_responder_disabled: false, org_id: "org-1" } });
+      mocks.applyKeyword.mockResolvedValueOnce({ escalated: true, reason: "keyword:legal_contract", flagOk: true });
+      const { response, statuses, claimUpdates } = await runCapturing();
+      expect(response.status).toBe(200);
+      expect(claimUpdates).toEqual([]);
+      expect(mocks.checkHot.mock.calls[0][6]).toEqual({ holdFailed: false });
+      expect(mocks.checkHot).toHaveBeenCalledTimes(1);
+      expect(escalatedStamps()).toHaveLength(1);
+      expect(statuses).toContain("processed");
+      expect(statuses).not.toContain("error");
+      expect(mocks.markComplete).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("responder turned off on the property: the delayed path writes no keyword hold and no alert", async () => {
@@ -670,13 +811,17 @@ describe("handleInboundWebhook reply delay vs. approved-template replies", () =>
       }
     };
 
-    it.each(["STOP", "stop", " Stop ", "STOPALL", "unsubscribe", "CANCEL", "end", "Quit"])("bare %j suppresses the number", async (body) => {
+    it.each([
+      "STOP", "stop", " Stop ", "STOPALL", "unsubscribe", "CANCEL", "end", "Quit",
+      // Real 2026-10-28 bodies that were wrongly held instead of suppressed.
+      "STOP!!!!", "Stop!!!!!!!", "STOP.", "STOP\n", "\u200BSTOP", "STOP\u00A0",
+    ])("bare %j suppresses the number", async (body) => {
       await withBody(body);
       expect(mocks.optOut).toHaveBeenCalledTimes(1);
       expect(mocks.optOut).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ surface: "stop" }));
     });
 
-    it.each(["stop texting me", "do not contact me", "leave me alone", "please stop", "remove me", "STOP texting me you idiot"])(
+    it.each(["stop texting me", "do not contact me", "leave me alone", "please stop", "remove me", "STOP texting me you idiot", "REMOVE", "OPTOUT "])(
       "phrase %j does NOT suppress: it is held for a person, nothing dispatched",
       async (body) => {
         await withBody(body);

@@ -13,6 +13,15 @@ import type { HoldInfo } from "./types";
  */
 export const KNOWN_HOLD_REASONS: readonly string[] = [
   // Flags set by the responder, Jev and the sequences engine.
+  "nine_asked_stop",
+  "nine_needs_person",
+  "nine_close_wrong_person_context_changed",
+  "nine_close_wrong_person_unreadable",
+  "nine_deferred_context_changed",
+  "nine_repeat_no_drip_stop_failed",
+  "nine_just_ok_drip_resume_failed",
+  "reply_text_not_approved",
+  "classifier_engine_unreadable",
   "hot_lead",
   "price_or_offer",
   "distress",
@@ -27,6 +36,8 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "number_source_answer_received",
   "draft_persist_failed",
   "reply_pending",
+  "nine_reply_deferred",
+  "nine_hot_reply_context_changed",
   "needs_reply",
   "send_timeout",
   "send_timeout_then_sent",
@@ -43,6 +54,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "jev_new_lead_promotion_failed",
   "hot_lead_assign_failed",
   "hot_lead_event_failed",
+  "hot_alert_event_failed",
   "jev_unclear_no_action",
   // Model judgments about opt-out / DNC / phone-wide wrong number never act
   // on their own (Jarrad 2026-10-07); a human confirms each one.
@@ -79,6 +91,7 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "already_flagged",
   "evidence_truncated",
   "superseded_before_send",
+  "superseded_by_newer_inbound",
   "superseded_by_broadcast",
   "rep_text_scheduled",
   "sent_late",
@@ -115,8 +128,13 @@ export const KNOWN_HOLD_REASON_PREFIXES: readonly string[] = [
   "nurture_reply_not_sent:",
   "drip_enroll_failed:",
   "jev_automatic_failed:",
+  // Nine-question engine (Messages v2 PR 3).
+  "nine_reply_not_sent:",
+  "nine_automation_disabled:",
   "model:",
   "already_flagged:",
+  // Routing v2 cutover: run outcome reason routing_v2:<road> (auto_closed, never a hold).
+  "routing_v2:",
 ];
 
 /** Marker appended once a timeout flag's dead-letter row exists (`send_timeout:<id>:backed`). */

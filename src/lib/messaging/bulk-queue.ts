@@ -10,6 +10,7 @@
  * and template behavior are unchanged; the integration suite pins them.
  */
 
+import { hasOpenConfirmHold } from "./confirm-hold";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getConsentState } from "@/lib/messaging/consent";
@@ -20,7 +21,13 @@ import {
 import { getMessagingProvider } from "@/lib/messaging/registry";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { pickFromPool } from "@/lib/templates/pool";
-import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { loadTemplateVarsWithMeta } from "@/lib/sequences/template-vars";
+import {
+  RAPID_OFFER_ROUND_TO,
+  rapidOfferBlocksSend,
+  usesRapidOfferToken,
+  type RapidOfferMeta,
+} from "@/lib/templates/rapid-offer";
 import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 import {
@@ -103,6 +110,16 @@ export type BulkSmsScheduleState = {
   dayBucketCount: number;
   succeeded: number;
   skipped: number;
+  /**
+   * Subset of `skipped`: body used `{{rapid_offer}}` but the property has
+   * no stored value. Optional so legacy serialized state still parses.
+   */
+  skippedNoValue?: number;
+  /**
+   * Subset of `skipped`: the property has an open, uncleared stop-texting or
+   * hostile hold (Jarrad's decision 2026-11-08), so the campaign skips it.
+   */
+  skippedConfirmHold?: number;
   failed: { propertyId: string; message: string }[];
 };
 
@@ -113,6 +130,8 @@ export function freshScheduleState(anchorMs: number): BulkSmsScheduleState {
     dayBucketCount: 0,
     succeeded: 0,
     skipped: 0,
+    skippedNoValue: 0,
+    skippedConfirmHold: 0,
     failed: [],
   };
 }
@@ -185,6 +204,8 @@ export async function queueSmsBatch(
     homeowner_contact_id: string | null;
     org_id: string | null;
     outreach_dispo: string | null;
+    needs_human_attention: boolean | null;
+    last_ai_escalation_reason: string | null;
     homeowner: SmsPhoneContact | null;
   }[] = [];
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
@@ -193,6 +214,7 @@ export async function queueSmsBatch(
       .from("properties")
       .select(
         `id, homeowner_contact_id, org_id, outreach_dispo,
+         needs_human_attention, last_ai_escalation_reason,
          homeowner:contacts!properties_homeowner_contact_id_fkey(
            phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type
          )`,
@@ -374,6 +396,12 @@ export async function queueSmsBatch(
       continue;
     }
 
+    if (hasOpenConfirmHold(property)) {
+      state.skipped++;
+      state.skippedConfirmHold = (state.skippedConfirmHold ?? 0) + 1;
+      continue;
+    }
+
     if (
       shouldSuppressAutomatedSend({
         outreachDispo: property.outreach_dispo,
@@ -448,9 +476,9 @@ export async function queueSmsBatch(
       continue;
     }
 
-    let body: string | null = null;
+    let rawBody: string | null = null;
     if (opts.body) {
-      body = opts.body;
+      rawBody = opts.body;
     } else if (opts.templateCategory) {
       if (!property.org_id) {
         state.skipped++;
@@ -466,11 +494,31 @@ export async function queueSmsBatch(
         state.skipped++;
         continue;
       }
-      const vars = await loadTemplateVars(client, {
+      rawBody = template.content;
+    }
+
+    if (!rawBody) {
+      state.skipped++;
+      continue;
+    }
+
+    // Literal bodies render too, so merge tokens like {{rapid_offer}} work
+    // in the ad-hoc Bulk SMS modal. A body with no `{{` skips the lookup.
+    let body: string = rawBody;
+    let rapidOffer: RapidOfferMeta | null = null;
+    const usesRapidOffer = usesRapidOfferToken(rawBody);
+    if (rawBody.includes("{{")) {
+      const loaded = await loadTemplateVarsWithMeta(client, {
         propertyId,
         contactId,
       });
-      body = renderTemplate(template.content, vars);
+      rapidOffer = loaded.rapidOffer;
+      if (rapidOfferBlocksSend(rawBody, loaded.vars)) {
+        state.skipped++;
+        state.skippedNoValue = (state.skippedNoValue ?? 0) + 1;
+        continue;
+      }
+      body = renderTemplate(rawBody, loaded.vars);
     }
 
     if (!body) {
@@ -509,6 +557,13 @@ export async function queueSmsBatch(
       queueOnly: true,
       scheduledFor,
       requiresOpeningIdentity: opts.templateCategory === "Opener - Homeowner",
+      ...(usesRapidOffer && rapidOffer
+        ? {
+            metadata: {
+              rapidOffer: { ...rapidOffer, roundTo: RAPID_OFFER_ROUND_TO },
+            },
+          }
+        : {}),
     });
 
     if (outcome.status === "queued" || outcome.status === "paused") {

@@ -7,6 +7,7 @@ export type CampaignJobSummary = {
   processedItems: number;
   succeededItems: number;
   failedItems: number;
+  skippedItems?: number | null;
   errorMessage: string | null;
 };
 
@@ -43,7 +44,9 @@ export function CampaignOperationsPanel({ stats }: Props) {
         <h2 className="text-lg font-bold tracking-normal">Live send progress</h2>
         <p className="text-muted-foreground text-sm">
           Queue setup and message delivery are separate. A built queue can still
-          be sending.
+          be sending. Frozen audience counts property/contact entries; a contact can
+          appear on more than one property. Skipped entries remain in the campaign
+          but do not create messages.
         </p>
       </div>
 
@@ -59,6 +62,8 @@ export function CampaignOperationsPanel({ stats }: Props) {
         <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <Metric label="Frozen audience" value={stats.audience} />
           <Metric label="Queued to send" value={stats.queued} />
+          {stats.job?.skippedItems != null && <Metric label="Skipped recipient entries" value={stats.job.skippedItems} />}
+          {stats.job && <Metric label="Properties processed" value={`${stats.job.processedItems.toLocaleString()} / ${stats.job.totalItems.toLocaleString()}`} />}
           <Metric label="Paused" value={stats.paused} />
           <Metric label="Due now" value={stats.dueQueued} />
           <Metric label="Pending provider result" value={stats.pending} />
@@ -79,8 +84,9 @@ export function CampaignOperationsPanel({ stats }: Props) {
             <span>
               Queue-building job: {formatJobStatus(stats.job.status)} ·{" "}
               {stats.job.succeededItems.toLocaleString()} queued,{" "}
-              {stats.job.failedItems.toLocaleString()} failed of{" "}
-              {stats.job.totalItems.toLocaleString()}
+              {stats.job.failedItems.toLocaleString()} failed
+              {stats.job.skippedItems != null ? `, ${stats.job.skippedItems.toLocaleString()} skipped` : ""}
+              {" · "}{stats.job.processedItems.toLocaleString()} of {stats.job.totalItems.toLocaleString()} properties processed
               {stats.job.errorMessage ? ` · ${stats.job.errorMessage}` : ""}
             </span>
           ) : (

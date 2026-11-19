@@ -39,6 +39,7 @@ describe("<CampaignOperationsPanel />", () => {
             processedItems: 120,
             succeededItems: 118,
             failedItems: 2,
+            skippedItems: 10,
             errorMessage: null,
           },
         }}
@@ -49,6 +50,7 @@ describe("<CampaignOperationsPanel />", () => {
     expect(
       screen.getByText("Queue setup: queue built; still sending"),
     ).toBeInTheDocument();
+    expect(screen.getByText("Skipped recipient entries")).toBeInTheDocument();
     expect(screen.getByText("Frozen audience")).toBeInTheDocument();
     expect(screen.getByText("Queued to send")).toBeInTheDocument();
     expect(screen.getByText("Handed to provider")).toBeInTheDocument();
@@ -56,7 +58,7 @@ describe("<CampaignOperationsPanel />", () => {
     expect(screen.getByText("in 30s")).toBeInTheDocument();
     expect(screen.getByText("2h 30m")).toBeInTheDocument();
     expect(
-      screen.getByText(/Queue-building job: completed · 118 queued, 2 failed of 120/),
+      screen.getByText(/Queue-building job: completed · 118 queued, 2 failed, 10 skipped · 120 of 120 properties processed/),
     ).toBeInTheDocument();
     expect(screen.getByText(/Cadence: 8s/)).toBeInTheDocument();
   });

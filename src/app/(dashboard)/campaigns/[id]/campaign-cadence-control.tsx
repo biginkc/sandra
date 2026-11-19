@@ -50,6 +50,34 @@ export function CampaignCadenceControl({
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
+  // Every action outcome is surfaced: an ok:false result OR a thrown/rejected
+  // server action (network drop, function timeout) shows a visible error.
+  function runAction<T>(
+    label: string,
+    action: () => Promise<
+      { ok: true; data: T } | { ok: false; error: { message: string } }
+    >,
+    onOk: (data: T) => void,
+    onFail?: () => void,
+  ) {
+    startTransition(async () => {
+      try {
+        const result = await action();
+        if (result.ok) {
+          onOk(result.data);
+          return;
+        }
+        onFail?.();
+        setError(`${label} failed: ${result.error.message}`);
+      } catch (e) {
+        onFail?.();
+        setError(
+          `${label} failed: ${e instanceof Error ? e.message : "unexpected error"}`,
+        );
+      }
+    });
+  }
+
   const paceSeconds = Number(pace);
   const paceIsInteger = Number.isInteger(paceSeconds);
   const isPaused = campaignStatus === "paused";
@@ -68,15 +96,14 @@ export function CampaignCadenceControl({
     setApplied(null);
     setPaused(null);
     setResumed(null);
-    startTransition(async () => {
-      const result = await previewCampaignCadenceChange(campaignId, paceSeconds);
-      if (result.ok) {
-        setPreview(result.data);
-      } else {
-        setPreview(null);
-        setError(result.error.message);
-      }
-    });
+    runAction(
+      "Preview",
+      () => previewCampaignCadenceChange(campaignId, paceSeconds),
+      (data) => {
+        setPreview(data);
+      },
+      () => setPreview(null),
+    );
   }
 
   function runApply() {
@@ -89,20 +116,15 @@ export function CampaignCadenceControl({
     setError(null);
     setPaused(null);
     setResumed(null);
-    startTransition(async () => {
-      const result = await applyCampaignCadenceChange(
-        campaignId,
-        paceSeconds,
-        true,
-      );
-      if (result.ok) {
-        setApplied(result.data);
-        setPreview(result.data);
+    runAction(
+      "Apply cadence",
+      () => applyCampaignCadenceChange(campaignId, paceSeconds, true),
+      (data) => {
+        setApplied(data);
+        setPreview(data);
         router.refresh();
-      } else {
-        setError(result.error.message);
-      }
-    });
+      },
+    );
   }
 
   function runPause() {
@@ -115,15 +137,14 @@ export function CampaignCadenceControl({
     setApplied(null);
     setPreview(null);
     setResumed(null);
-    startTransition(async () => {
-      const result = await pauseCampaignSends(campaignId, true);
-      if (result.ok) {
-        setPaused(result.data);
+    runAction(
+      "Pause",
+      () => pauseCampaignSends(campaignId, true),
+      (data) => {
+        setPaused(data);
         router.refresh();
-      } else {
-        setError(result.error.message);
-      }
-    });
+      },
+    );
   }
 
   function runResume() {
@@ -136,15 +157,14 @@ export function CampaignCadenceControl({
     setApplied(null);
     setPreview(null);
     setPaused(null);
-    startTransition(async () => {
-      const result = await resumeCampaignSends(campaignId, paceSeconds, true);
-      if (result.ok) {
-        setResumed(result.data);
+    runAction(
+      "Resume",
+      () => resumeCampaignSends(campaignId, paceSeconds, true),
+      (data) => {
+        setResumed(data);
         router.refresh();
-      } else {
-        setError(result.error.message);
-      }
-    });
+      },
+    );
   }
 
   return (
@@ -224,7 +244,10 @@ export function CampaignCadenceControl({
         {resumed ? <CadenceResult result={resumed} label="Resumed" /> : null}
         {paused ? <PauseResult result={paused} /> : null}
         {error ? (
-          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-semibold text-destructive"
+          >
             {error}
           </div>
         ) : null}

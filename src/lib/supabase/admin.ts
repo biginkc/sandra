@@ -12,12 +12,19 @@ import type { Database } from "./types";
  * caller is an admin, or from cron/webhook contexts that don't have
  * a user session at all.
  */
+/** The URL createAdminClient() connects to (scripts guard this exact target). */
+export function adminClientTargetUrl(): string | undefined {
+  const useTestEnv =
+    process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+  return useTestEnv
+    ? (process.env.TEST_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL)
+    : process.env.NEXT_PUBLIC_SUPABASE_URL;
+}
+
 export function createAdminClient(): SupabaseClient<Database> {
   const useTestEnv =
     process.env.NODE_ENV === "test" || process.env.VITEST === "true";
-  const url = useTestEnv
-    ? (process.env.TEST_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL)
-    : process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const url = adminClientTargetUrl();
   const key = useTestEnv
     ? (process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
         process.env.SUPABASE_SERVICE_ROLE_KEY)

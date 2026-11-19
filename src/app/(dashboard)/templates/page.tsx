@@ -13,6 +13,8 @@ import { listAutoReplySettings } from "./auto-reply-actions";
 import { AutoReplySettingsSection } from "./auto-reply-settings";
 import { NewTemplateButton } from "./new-template-button";
 import { TemplatesList } from "./templates-list";
+import { listVoicemailTemplates } from "./voicemail-template-actions";
+import { VoicemailTemplatesSection } from "./voicemail-templates-section";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 
 const TEMPLATES_SORTABLE_COLUMNS = [
@@ -40,11 +42,12 @@ export default async function TemplatesPage({
   // independent. parseTableSearch is the pure helper from .helpers (NOT
   // the hook module) per Plan 01-03's RSC boundary fix — server
   // components must stay outside the 'use client' barrier.
-  const [raw, templatesResult, categoriesResult, memberships] = await Promise.all([
+  const [raw, templatesResult, categoriesResult, memberships, voicemailResult] = await Promise.all([
     searchParams,
     listTemplates(),
     listCategories(),
     getCallerMembershipsOrThrow(),
+    listVoicemailTemplates(),
   ]);
   // Approving a template for automatic replies is owner-only (the database
   // enforces it; the control is simply not shown to anyone else).
@@ -100,6 +103,13 @@ export default async function TemplatesPage({
         senderName={senderName}
         isOwner={isOwner}
       />
+
+      {!voicemailResult.ok && (
+        <div className="text-destructive text-sm">
+          Failed to load voicemail scripts: {voicemailResult.error.message}
+        </div>
+      )}
+      <VoicemailTemplatesSection templates={voicemailResult.ok ? voicemailResult.data : []} />
     </Page>
   );
 }

@@ -37,7 +37,13 @@ describe("inbound keyword gates stay ahead of Jev; only a bare STOP suppresses",
     expect(body).not.toContain("applyPhoneLevelOptOut(");
   });
 
-  it("does not consult Jev classification before the gates", () => {
-    expect(src.slice(0, stopGate)).not.toMatch(/classifyWithJev|sms-classification/);
+  it("does not call Jev classification or the routing v2 shadow before the gates", () => {
+    // Imports are allowed; what matters is that no call site precedes the stop gate.
+    const beforeGate = src
+      .slice(0, stopGate)
+      .split("\n")
+      .filter((line) => !/^\s*(import\b|export\b.*\bfrom\b|\}\s*from\b)/.test(line))
+      .join("\n");
+    expect(beforeGate).not.toMatch(/\bclassifyWithJev\(|\bscheduleRoutingV2Shadow\(|\brunRoutingV2Shadow\(|\bscheduleShadowAfterStamp\(/);
   });
 });

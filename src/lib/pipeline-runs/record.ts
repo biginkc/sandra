@@ -3,6 +3,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { reportError } from "@/lib/errors/report";
 import type { Database, Json } from "@/lib/supabase/types";
 
+import { STALE_RUNNING_REASON, WAIT_STEP_NAMES } from "./maintenance";
+
 import type {
   MaybeRunContext,
   PipelineRunContext,
@@ -214,7 +216,12 @@ export async function recordStep(
         result: step.result,
         detail: sanitizeStepDetail(step.detail ?? {}) as Json,
       });
-      if (!error) return;
+      if (!error) {
+        if ((WAIT_STEP_NAMES as readonly string[]).includes(step.name)) {
+          await reopenSweptRun(admin, ctx.runId);
+        }
+        return;
+      }
       const isSeqCollision =
         (error as { code?: string }).code === "23505" && attempt < 3;
       if (!isSeqCollision) {
@@ -234,6 +241,21 @@ export async function recordStep(
   } catch (error) {
     report("step", error);
   }
+}
+
+/**
+ * A run that records a new wait (retry / send-window deferral / reply delay)
+ * is alive. If the stale sweeper closed it in the meantime, put it back to
+ * running so the activity feed does not show a false error while it waits.
+ */
+async function reopenSweptRun(admin: Admin, runId: string): Promise<void> {
+  const { error } = await admin
+    .from("pipeline_runs")
+    .update({ status: "running", reason: null, completed_at: null })
+    .eq("id", runId)
+    .eq("status", "error")
+    .eq("reason", STALE_RUNNING_REASON);
+  if (error) report("reopen", error);
 }
 
 export type RunPatch = {
@@ -290,8 +312,10 @@ export type FinishRunInput = RunPatch & {
 /**
  * Stamp the terminal state. Never throws. Only a run still `running` can
  * transition: a second terminal write (a late workflow after the webhook
- * already stamped the run, or after the stale sweep) never overwrites the
- * first. The rejected attempt is recorded as a `terminal_conflict` step.
+ * already stamped the run) never overwrites the first. The rejected attempt
+ * is recorded as a `terminal_conflict` step. Exception: a run the stale
+ * sweeper closed (error/stale_running) is corrected by the real finish, since
+ * the sweep was only a guess that the run had died.
  *
  * Terminal ownership: once a run has a claim_id, only the caller presenting
  * that claim (input.claimId, else the claim this context won) may write a
@@ -316,23 +340,32 @@ export async function finishRun(
     return;
   }
   try {
-    let query = admin
+    // One atomic update: the run must be `running` OR a stale-sweep guess
+    // (error/stale_running), and the claim must be null or the presented
+    // one. A single statement cannot lose to a concurrent reopen.
+    const eligible = ["status.eq.running", `status.eq.error`];
+    const claimTerms = presentedClaim
+      ? ["claim_id.is.null", `claim_id.eq.${presentedClaim}`]
+      : ["claim_id.is.null"];
+    const terms: string[] = [];
+    for (const claim of claimTerms) {
+      terms.push(`and(${eligible[0]},${claim})`);
+      terms.push(`and(${eligible[1]},reason.eq.${STALE_RUNNING_REASON},${claim})`);
+    }
+    const { data, error } = await admin
       .from("pipeline_runs")
       .update({
         ...patchColumns(input),
         status: input.status,
-        ...(input.finalOutcome !== undefined
-          ? { final_outcome: input.finalOutcome }
-          : {}),
-        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+        // Only finishRun and the sweeper write these, so null is the right
+        // default and clears a swept row's stale_running.
+        final_outcome: input.finalOutcome ?? null,
+        reason: input.reason ?? null,
         completed_at: new Date().toISOString(),
       })
       .eq("id", ctx.runId)
-      .eq("status", "running");
-    query = presentedClaim
-      ? query.or(`claim_id.is.null,claim_id.eq.${presentedClaim}`)
-      : query.is("claim_id", null);
-    const { data, error } = await query.select("id");
+      .or(terms.join(","))
+      .select("id");
     if (error) {
       report("finish", error);
       return;

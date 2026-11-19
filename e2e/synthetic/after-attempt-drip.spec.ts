@@ -9,9 +9,11 @@ test.beforeAll(async () => {
     define:{"process.env.NODE_ENV":'"test"'},
     plugins:[{name:"offline",setup(build) {
       build.onResolve({filter:/sequences\/actions$/},()=>({path:"actions",namespace:"offline"}));
+      build.onResolve({filter:/sequences\/drip-choices-client$/},()=>({path:"actions",namespace:"offline"}));
       build.onResolve({filter:/sequences\/drip-progress$/},()=>({path:"progress",namespace:"offline"}));
       build.onResolve({filter:/supabase\/client$/},()=>({path:"client",namespace:"offline"}));
       build.onLoad({filter:/.*/,namespace:"offline"}, args => ({loader:"js",contents: args.path === "client" ? 'export const createClient=()=>({});' : args.path === "progress" ? 'export const listDripProgress=async()=>window.dripProgress;' : `
+        export const fetchDripChoices=async()=>listDripChoices();
         export const listDripChoices=async()=>({ok:true,data:Array.from({length:30},(_,i)=>({id:String(i),name:'Drip '+i,textCount:4,days:60,firstSend:'Tomorrow'}))});
         export const changeDripAction=async(enrollment,id)=>{window.switchCalls.push([enrollment,id]);window.dripProgress=[];return {ok:true,data:{status:'failed',reason:'Previous drip stopped. Synthetic blocked enrollment.'}}};
         export const startDripForLeads=async()=>({ok:true,data:{results:[{status:'failed',reason:'Synthetic start rejected.'}]}});

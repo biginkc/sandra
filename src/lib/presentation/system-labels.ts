@@ -29,6 +29,7 @@ export const PROPERTY_STATUS_LABELS: Readonly<Record<string, string>> = {
 export const SEQUENCE_ACTION_LABELS: Readonly<Record<string, string>> = {
   send_sms: "Send SMS",
   change_status: "Change status",
+  send_voicemail_drop: "Voicemail drop",
 };
 
 export const MEMBERSHIP_ROLE_LABELS: Readonly<Record<string, string>> = {

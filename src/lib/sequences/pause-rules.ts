@@ -29,7 +29,9 @@ export type PauseReason =
   | "consent_revoked"
   | "appointment_booked"
   | "call_in_progress"
-  | "norma_call";
+  | "norma_call"
+  /** Seller called back (Norma inbound call record matched to the contact). */
+  | "inbound_call";
 
 export type PauseDecision = {
   shouldPause: boolean;

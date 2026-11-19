@@ -3,6 +3,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { timeServerAction } from "@/lib/perf/server-action-log";
 
 /**
  * Shape the bell UI actually renders. Column names are camelCased and
@@ -28,6 +29,10 @@ export type NotificationRow = {
 
 /** Count of unread notifications for the current user. Drives the badge. */
 export async function getUnreadCount(): Promise<Result<number>> {
+  return timeServerAction("getUnreadCount", unreadCount);
+}
+
+async function unreadCount(): Promise<Result<number>> {
   try {
     const supabase = await createClient();
     const {

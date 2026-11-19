@@ -132,6 +132,67 @@ describe("<CampaignCadenceControl />", () => {
     expect(await screen.findByText(/^Resumed:/)).toBeInTheDocument();
     expect(refresh).toHaveBeenCalledTimes(1);
   });
+
+  it("shows a visible error when resume returns ok:false (prod statement timeout)", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    resumeCampaignSends.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "CADENCE_CHANGE_FAILED",
+        message: "canceling statement due to statement timeout",
+      },
+    });
+    renderControl({ campaignStatus: "paused", queuedCount: 0, pausedCount: 2720 });
+
+    await user.click(screen.getByRole("button", { name: /resume sends/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Resume failed: canceling statement due to statement timeout",
+    );
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("shows a visible error when pause returns ok:false", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    pauseCampaignSends.mockResolvedValue({
+      ok: false,
+      error: { code: "CAMPAIGN_PAUSE_FAILED", message: "pause boom" },
+    });
+    renderControl();
+
+    await user.click(screen.getByRole("button", { name: /pause sends/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Pause failed: pause boom");
+  });
+
+  it("shows a visible error when apply returns ok:false", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    applyCampaignCadenceChange.mockResolvedValue({
+      ok: false,
+      error: { code: "CADENCE_CHANGE_FAILED", message: "apply boom" },
+    });
+    renderControl();
+
+    await user.click(screen.getByRole("button", { name: /preview cadence/i }));
+    await screen.findByText(/^Preview:/);
+    await user.click(screen.getByRole("button", { name: /apply cadence/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Apply cadence failed: apply boom");
+  });
+
+  it("shows a visible error when the server action itself rejects", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    resumeCampaignSends.mockRejectedValue(new Error("Failed to fetch"));
+    renderControl({ campaignStatus: "paused", queuedCount: 0, pausedCount: 10 });
+
+    await user.click(screen.getByRole("button", { name: /resume sends/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Resume failed: Failed to fetch");
+  });
 });
 
 function renderControl(

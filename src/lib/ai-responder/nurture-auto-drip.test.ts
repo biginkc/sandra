@@ -116,6 +116,11 @@ describe("enrollNurtureInDrip", () => {
     expect(mocks.enrollLead).toHaveBeenCalledTimes(1);
     expect(mocks.enrollLead).toHaveBeenCalledWith(supabase, { propertyId: "p1", sequenceId: "s1", enrolledByUserId: null, firstSendNotBefore: expect.any(Date) });
   });
+  it("passes the replying contact through to enrollLead (lead with no saved homeowner)", async () => {
+    mocks.enrollLead.mockResolvedValue({ status: "enrolled", enrollmentId: "e1", sequenceLabel: "x" });
+    await enrollNurtureInDrip(supabase, { propertyId: "p1", sequenceId: "s1", contactId: "c-replier" });
+    expect(mocks.enrollLead).toHaveBeenCalledWith(supabase, expect.objectContaining({ contactId: "c-replier" }));
+  });
   it("records the originating route on the enrolment (immutable identity)", async () => {
     mocks.enrollLead.mockResolvedValue({ status: "enrolled", enrollmentId: "e1", sequenceLabel: "x" });
     await enrollNurtureInDrip(supabase, { propertyId: "p1", sequenceId: "s1", delayDays: 30, route: "maybe_later" });

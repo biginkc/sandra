@@ -7,10 +7,7 @@ const routerRefreshMock = vi.hoisted(() => vi.fn());
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: routerRefreshMock }),
 }));
-vi.mock("../actions", () => ({
-  loadLeadVars: vi.fn(),
-  sendSmsFromLead: vi.fn(),
-}));
+vi.mock("../load-lead-vars", () => ({ loadLeadVars: vi.fn() }));
 vi.mock("../send-sms-stamped", () => ({ sendSmsFromLeadStamped: vi.fn() }));
 vi.mock("sonner", () => ({
   toast: {

@@ -1,5 +1,7 @@
 "use server";
 
+import { buildLeadDeepLink } from "@/lib/leads/deep-link";
+
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
@@ -333,7 +335,6 @@ async function bookAppointmentLegacy(
     // pause enrollments or reveal UI state for a DIFFERENT property than
     // the one the persisted task is actually linked to.
     const linkedPropertyId = data.related_property_id ?? undefined;
-    const linkedContactId = data.contact_id ?? undefined;
 
     if (linkedPropertyId && !result.duplicate) {
       const events: RecordLeadEventInput[] = [
@@ -394,10 +395,7 @@ async function bookAppointmentLegacy(
       const subjectLabel = linkedPropertyId
         ? await loadPropertyAddress(supabase, linkedPropertyId)
         : input.title;
-      const deepLink = buildAppointmentDeepLink(
-        linkedPropertyId,
-        linkedContactId,
-      );
+      const deepLink = buildLeadDeepLink(linkedPropertyId);
       after(async () => {
         await Promise.allSettled([
           dispatchTaskAssigned(supabase, {
@@ -568,22 +566,6 @@ async function loadPropertyAddress(
     .eq("id", propertyId)
     .maybeSingle();
   return data?.address ?? "Appointment";
-}
-
-function buildAppointmentDeepLink(
-  propertyId?: string,
-  contactId?: string,
-): string {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ??
-    process.env.APP_URL ??
-    "https://sandra-sooty.vercel.app";
-  const normalizedBaseUrl = baseUrl.startsWith("http")
-    ? baseUrl
-    : `https://${baseUrl}`;
-  if (propertyId) return `${normalizedBaseUrl}/leads/${propertyId}`;
-  if (contactId) return `${normalizedBaseUrl}/messages?thread=${contactId}`;
-  return `${normalizedBaseUrl}/dashboard`;
 }
 
 export type BookingAssigneeContext = {

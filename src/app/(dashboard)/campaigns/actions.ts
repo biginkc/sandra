@@ -15,6 +15,7 @@ import {
   type BulkSmsQueueBaseOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  checkSenderSendable,
   loadCampaignDeliverySettings,
   loadDeliveryCatalog,
   normalizeSenderNumber,
@@ -30,17 +31,24 @@ import {
   validateSmsPaceSeconds,
 } from "@/lib/messaging/pacing";
 import {
-  classifySmsPhoneAvailability,
-  type SmsPhoneContact,
+  selectBestSmsPhone,
 } from "@/lib/messaging/sms-phone";
 import {
   EMPTY_AUDIENCE_VALIDATION_MESSAGE,
   hasEffectiveAudience,
 } from "@/lib/prospects/effective-audience";
 import { decodeFilters, type FilterBlock } from "@/lib/prospects/filter-schema";
+import {
+  runBatchedCadenceRpc,
+  runBatchedPauseRpc,
+  type CampaignQueueRpcClient,
+} from "@/lib/campaigns/queue-batches";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import type { Database, Json } from "@/lib/supabase/types";
+
+import { assessCampaignLaunch, type PreviewContact, type PreviewProperty } from "@/lib/campaigns/launch-assessment";
+import { loadSuppressedSmsPhoneSet } from "@/lib/messaging/phone-suppression-read";
 
 const PROPERTY_CHUNK = 250;
 const RECIPIENT_PAGE = 1000;
@@ -104,6 +112,10 @@ export type CampaignLaunchPreview = {
   landlineCount: number;
   unknownLineTypeCount: number;
   optedOutCount: number;
+  dncCount: number;
+  propertySuppressedCount: number;
+  phoneSuppressedCount: number;
+  duplicateDestinationCount: number;
 };
 
 export type CampaignCadenceChangeResult = {
@@ -137,8 +149,6 @@ type CampaignCadenceRpcName =
   | "apply_campaign_cadence_reschedule"
   | "resume_campaign_queue";
 
-type CampaignPauseRpcName = "pause_campaign_queue";
-
 type CampaignCadenceRpcClient = {
   rpc: (
     fn: CampaignCadenceRpcName,
@@ -150,19 +160,6 @@ type CampaignCadenceRpcClient = {
     },
   ) => Promise<{
     data: CampaignCadenceRpcRow[] | null;
-    error: { message: string } | null;
-  }>;
-};
-
-type CampaignPauseRpcClient = {
-  rpc: (
-    fn: CampaignPauseRpcName,
-    args: {
-      p_campaign_id: string;
-      p_operator_confirmed: boolean;
-    },
-  ) => Promise<{
-    data: CampaignQueuePauseRpcRow[] | null;
     error: { message: string } | null;
   }>;
 };
@@ -640,14 +637,33 @@ async function runCadenceRpc(
   const rpc =
     rpcClient ??
     ((await createClient()) as unknown as CampaignCadenceRpcClient);
-  const { data, error } = await rpc.rpc(fn, {
+  const args = {
     p_campaign_id: campaignId,
     p_pace_seconds: paceSeconds,
     p_start_after_seconds: CADENCE_RESCHEDULE_START_AFTER_SECONDS,
     ...(operatorConfirmed === undefined
       ? {}
       : { p_operator_confirmed: operatorConfirmed }),
-  });
+  };
+
+  if (fn !== "preview_campaign_cadence_reschedule") {
+    // Write RPCs touch at most one batch per call (statement_timeout is 8s
+    // in prod); loop until nothing remains.
+    const batched = await runBatchedCadenceRpc(
+      rpc as unknown as CampaignQueueRpcClient,
+      fn,
+      args,
+    );
+    if (!batched.ok) {
+      return {
+        ok: false,
+        error: { code: "CADENCE_CHANGE_FAILED", message: batched.message },
+      };
+    }
+    return ok(normalizeCadenceRpcRow(batched.data, paceSeconds));
+  }
+
+  const { data, error } = await rpc.rpc(fn, args);
 
   if (error) {
     return {
@@ -768,23 +784,23 @@ export async function pauseCampaignSends(
     const access = await requireCampaignAccess(id.data);
     if (!access.ok) return access;
 
-    const rpc = createAdminClient() as unknown as CampaignPauseRpcClient;
-    const { data, error } = await rpc.rpc("pause_campaign_queue", {
+    const rpc = createAdminClient() as unknown as CampaignQueueRpcClient;
+    const batched = await runBatchedPauseRpc(rpc, {
       p_campaign_id: id.data,
       p_operator_confirmed: true,
     });
 
-    if (error) {
+    if (!batched.ok) {
       return {
         ok: false,
-        error: { code: "CAMPAIGN_PAUSE_FAILED", message: error.message },
+        error: { code: "CAMPAIGN_PAUSE_FAILED", message: batched.message },
       };
     }
 
     revalidatePath(`/campaigns/${id.data}`);
     revalidatePath("/campaigns");
     revalidatePath("/messages");
-    return ok(normalizePauseRpcRow(data?.[0]));
+    return ok(normalizePauseRpcRow(batched.data));
   } catch (e) {
     reportError(e, { tags: { surface: "pause_campaign_sends" } });
     return errFromUnknown(e, "CAMPAIGN_PAUSE_FAILED");
@@ -976,6 +992,10 @@ export async function createCampaign(
     );
     if (!deliveryResult.ok) return deliveryResult;
     const delivery = deliveryResult.data;
+    // Create and revival both pass here (before the archived lookup), so a
+    // campaign whose sender is not sendable can no longer be created or revived.
+    const sendable = await checkSenderSendable(supabase, orgId, delivery);
+    if (!sendable.ok) return sendable;
 
     const { data: activeCandidates, error: activeLookupError } = await supabase
       .from("campaigns")
@@ -1353,16 +1373,16 @@ async function resolvePreviewRecipientRows(
 
 async function fetchContactsForPreview(
   contactIds: string[],
-): Promise<Result<Map<string, SmsPhoneContact>>> {
+): Promise<Result<Map<string, PreviewContact>>> {
   const supabase = await createClient();
-  const contacts = new Map<string, SmsPhoneContact>();
+  const contacts = new Map<string, PreviewContact>();
 
   for (let i = 0; i < contactIds.length; i += PROPERTY_CHUNK) {
     const chunk = contactIds.slice(i, i + PROPERTY_CHUNK);
     const { data, error } = await supabase
       .from("contacts")
       .select(
-        "id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type",
+        "id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out",
       )
       .in("id", chunk);
 
@@ -1377,6 +1397,8 @@ async function fetchContactsForPreview(
     }
     for (const row of data ?? []) {
       contacts.set(row.id, {
+        do_not_contact: row.do_not_contact,
+        sms_opted_out: row.sms_opted_out,
         phone_1: row.phone_1 ?? null,
         phone_1_type: row.phone_1_type ?? null,
         phone_2: row.phone_2 ?? null,
@@ -1498,14 +1520,14 @@ async function fetchRecipientSeedRows(
       homeownerByProperty.set(row.id, row.homeowner_contact_id ?? null);
     }
 
-    // Assigns explicitly provides independent source contacts. Preserve every
+    // Supported contact-centric exports provide independent source contacts. Preserve every
     // one as a recipient rather than guessing which contact is the homeowner.
     for (let from = 0; ; from += RECIPIENT_PAGE) {
       const { data: relationRows, error: relationError } = await supabase
         .from("property_contacts")
         .select("property_id, contact_id, source_identity")
         .in("property_id", chunk)
-        .eq("relationship", "assigns_contact")
+        .in("relationship", ["assigns_contact", "dealmachine_contact"])
         .order("property_id", { ascending: true })
         .order("contact_id", { ascending: true })
         .order("source_identity", { ascending: true })
@@ -1844,56 +1866,35 @@ export async function previewCampaignLaunch(
     ).filter((propertyId) => !successfulPriorContacts.has(propertyId)).length;
     const optedOutContacts = optedOutResult.data;
 
-    let estimatedQueueableCount = 0;
-    let successfulPriorContactCount = 0;
-    let missingContactCount = 0;
-    let landlineCount = 0;
-    let unknownLineTypeCount = 0;
-    let optedOutCount = 0;
-
-    for (const row of rows) {
-      if (
-        campaign.skip_if_contacted &&
-        successfulPriorContacts.has(row.propertyId)
-      ) {
-        successfulPriorContactCount += 1;
-        continue;
-      }
-
-      const contact = row.contactId ? contacts.get(row.contactId) : null;
-      const lineType = classifySmsPhoneAvailability(contact);
-      if (!row.contactId || lineType === "none") {
-        missingContactCount += 1;
-        continue;
-      }
-
-      if (lineType === "landline") {
-        landlineCount += 1;
-        continue;
-      }
-      if (lineType === "unknown") {
-        unknownLineTypeCount += 1;
-        continue;
-      }
-
-      if (optedOutContacts.has(row.contactId)) {
-        optedOutCount += 1;
-        continue;
-      }
-
-      estimatedQueueableCount += 1;
+    const supabase = await createClient();
+    const properties = new Map<string, PreviewProperty>();
+    const uniquePropertyIds = Array.from(new Set(propertyIds));
+    for (let i = 0; i < uniquePropertyIds.length; i += PROPERTY_CHUNK) {
+      const { data, error } = await supabase.from("properties")
+        .select("id, org_id, outreach_dispo, is_dnc_locked, deleted_at")
+        .in("id", uniquePropertyIds.slice(i, i + PROPERTY_CHUNK));
+      if (error) throw new Error(`Campaign property assessment: ${error.message}`);
+      for (const property of data ?? []) properties.set(property.id, property);
     }
-
+    const suppressedPhonesByOrg = new Map<string, Set<string>>();
+    const phonesByOrg = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const orgId = properties.get(row.propertyId)?.org_id;
+      const phone = selectBestSmsPhone(row.contactId ? contacts.get(row.contactId) : null)?.phone;
+      if (!orgId || !phone) continue;
+      const phones = phonesByOrg.get(orgId) ?? new Set<string>();
+      phones.add(phone);
+      phonesByOrg.set(orgId, phones);
+    }
+    for (const [orgId, phones] of phonesByOrg) {
+      suppressedPhonesByOrg.set(orgId, await loadSuppressedSmsPhoneSet(supabase, phones, orgId));
+    }
     return ok({
-      recipientCount: rows.length,
-      estimatedQueueableCount,
+      ...assessCampaignLaunch({ rows, contacts, properties, optedOut: optedOutContacts,
+        suppressedPhonesByOrg, priorSuccessful: successfulPriorContacts,
+        skipIfContacted: campaign.skip_if_contacted }),
       skipIfContacted: campaign.skip_if_contacted,
-      successfulPriorContactCount,
       priorFailedAttemptCount: priorFailedWithoutSuccessCount,
-      missingContactCount,
-      landlineCount,
-      unknownLineTypeCount,
-      optedOutCount,
     });
   } catch (e) {
     reportError(e, {

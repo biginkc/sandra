@@ -8,6 +8,9 @@ import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
 import type { Database } from "@/lib/supabase/types";
 
 import { createChannelSenders } from "./channels";
+import { loadSlackThread } from "./slack-thread";
+import { loadV2Opportunities, v2OpportunityStillAllowed } from "./v2-opportunities";
+import { loadV2OutboxAlerts, v2OutboxAlertGate } from "./v2-outbox-alerts";
 import { runHoldAlertsForOrg } from "./core";
 import { toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
@@ -19,8 +22,10 @@ import type {
   Recipient,
 } from "./types";
 import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
-import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey } from "@/lib/hot-sellers/hot";
+import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
 import { MAX_ATTEMPTS } from "./types";
+import { loadAmbiguousThreadAlerts } from "./ambiguous-threads";
+import { loadLeadReplies } from "./lead-replies";
 
 export { runHoldAlertsForOrg } from "./core";
 
@@ -186,7 +191,30 @@ export async function loadHotPromotions(
     }
     for (const [k, set] of finished) if (set.has("slack") && set.has("sms")) done.add(k);
   }
-  const todo0 = rows.filter((r) => !done.has(keyOf(r)));
+  // Exactly one alert per inbound: a text that already alerted (or is alerting)
+  // as lead_reply:<inbound> never sends a second, hot, alert.
+  const leadReplied = new Set<string>();
+  const srcIds = [...new Set(rows.map((r) => r.source_id))];
+  for (let i = 0; i < srcIds.length; i += HOT_PROMOTION_PAGE) {
+    const { data, error } = await db
+      .from("hold_alert_deliveries")
+      .select("hold_key, status, attempts")
+      .eq("org_id", orgId)
+      .in("hold_key", srcIds.slice(i, i + HOT_PROMOTION_PAGE).map(leadReplyKey));
+    if (error) {
+      // Unknown → hold the hot alert back this pass rather than risk two.
+      complete = false;
+      for (const id of srcIds.slice(i, i + HOT_PROMOTION_PAGE)) leadReplied.add(id);
+      continue;
+    }
+    // Only a live or sent lead reply stands in for the hot alert; a skipped or
+    // terminally failed one never swallows it.
+    for (const d of (data ?? []) as Array<{ hold_key: string; status: string; attempts: number }>) {
+      const live = d.status === "pending" || d.status === "sending" || d.status === "sent" || (d.status === "failed" && d.attempts < MAX_ATTEMPTS);
+      if (live) leadReplied.add(d.hold_key.slice("lead_reply:".length));
+    }
+  }
+  const todo0 = rows.filter((r) => !done.has(keyOf(r)) && !leadReplied.has(r.source_id));
   // A hot event's moment is its INBOUND text's arrival, never when the event
   // row was written (a pre-cutoff text retried later must not page). Every
   // event's source_id is that inbound; no verifiable time → dropped (fail closed).
@@ -209,7 +237,6 @@ export async function loadHotPromotions(
   const ids = [...new Set(todo.map((r) => r.property_id))];
   const names = new Map<string, string>();
   const addresses = new Map<string, string>();
-  const assignees = new Map<string, string | null>();
   for (let i = 0; i < ids.length; i += HOT_PROMOTION_PAGE) {
     const { data: props, error: propError } = await db
       .from("properties")
@@ -217,7 +244,6 @@ export async function loadHotPromotions(
       .in("id", ids.slice(i, i + HOT_PROMOTION_PAGE));
     if (propError) complete = false;
     for (const p of (props ?? []) as Array<{ id: string; address: string | null; city: string | null; assigned_user_id: string | null; contacts: { first_name: string | null } | null }>) {
-      assignees.set(p.id, p.assigned_user_id);
       const first = p.contacts?.first_name?.trim();
       if (first) names.set(p.id, first);
       const addr = [p.address?.trim(), p.city?.trim()].filter(Boolean).join(", ");
@@ -231,8 +257,7 @@ export async function loadHotPromotions(
     if (!to && !failed) continue;
     // An open hot hold already pinged Jarrad about this lead.
     if (r.payload?.covered_by_hold === true) continue;
-    // A hand-off counts only while the lead really is assigned to that person.
-    if (r.source_type === HOT_HANDOFF_SOURCE_TYPE && assignees.has(r.property_id) && assignees.get(r.property_id) !== to) continue;
+    // Assignment never gates a hot alert (owner decision 2026-10-19): Jarrad gets it whoever has the lead.
     promotions.push({
       propertyId: r.property_id,
       assigneeUserId: to ?? "",
@@ -257,6 +282,7 @@ export function createHoldAlertDeps(
   const db = admin as unknown as LooseSupabase;
   const senders = createChannelSenders(admin, { env });
   const now = () => new Date();
+  const ambiguousThreadEnabled = env.HOLD_ALERT_AMBIGUOUS_THREAD_ENABLED === "1";
   return {
     now,
     store: createSupabaseDeliveryStore(db),
@@ -267,19 +293,45 @@ export function createHoldAlertDeps(
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
     async loadHotPromotions(orgId, alertsSince) {
       const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
-      return loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      const hot = await loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      // Routing v2 opportunity alert: returns nothing unless routing_v2_flags.questions_live + replies.
+      const opportunities = await loadV2Opportunities(db, orgId, alertsSince, now().getTime(), owner).catch(
+        // Never let the v2 opportunity alert break today's hot alerts.
+        () => ({ promotions: [], complete: true }),
+      );
+      // Routing v2 owner alerts queued by live transitions (questions_live + replies only).
+      const outboxAlerts = await loadV2OutboxAlerts(db, orgId, alertsSince, now().getTime(), owner).catch(
+        () => ({ promotions: [], complete: true }),
+      );
+      if (opportunities.promotions.length === 0 && opportunities.complete
+        && outboxAlerts.promotions.length === 0 && outboxAlerts.complete) return hot;
+      // One alert per delivery key: today's hot alert first, then v2 alerts, then opportunities.
+      const existingKeys = new Set(hot.promotions.map((p) => p.key));
+      const v2 = outboxAlerts.promotions.filter((p) => !existingKeys.has(p.key));
+      for (const p of v2) existingKeys.add(p.key);
+      return {
+        promotions: [...hot.promotions, ...v2, ...opportunities.promotions.filter((p) => !existingKeys.has(p.key))],
+        complete: hot.complete && opportunities.complete && outboxAlerts.complete,
+      };
     },
+    async loadLeadReplies(orgId, alertsSince) {
+      const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
+      return ambiguousThreadEnabled
+        ? loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner, { ambiguousOwnsKeys: true })
+        : loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner);
+    },
+    ...(ambiguousThreadEnabled
+      ? {
+          async loadAmbiguousThreadAlerts(orgId: string, since: string) {
+            const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
+            return loadAmbiguousThreadAlerts(db, orgId, since, now().getTime(), owner);
+          },
+        }
+      : {}),
     loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
-    async loadPropertyAssignee(orgId, propertyId) {
-      const { data, error } = await db
-        .from("properties")
-        .select("assigned_user_id")
-        .eq("org_id", orgId)
-        .eq("id", propertyId)
-        .maybeSingle();
-      if (error) throw new Error(`assignment re-check failed: ${error.message}`);
-      return (data as { assigned_user_id: string | null } | null)?.assigned_user_id ?? null;
-    },
+    loadSlackThread: (orgId, lookup) => loadSlackThread(db, orgId, lookup, now().getTime()),
+    v2OpportunityStillAllowed: (orgId, propertyId, inboundId) => v2OpportunityStillAllowed(db, orgId, propertyId, inboundId),
+    v2OutboxAlertGate: (outboxId, key) => v2OutboxAlertGate(db, outboxId, key),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db
         .from("memberships")
