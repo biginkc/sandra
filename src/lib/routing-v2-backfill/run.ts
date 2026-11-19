@@ -25,6 +25,7 @@ import {
   ROUTING_V2_BACKFILL_CLASSIFY_ONLY,
   ROUTING_V2_BACKFILL_HOLD_ROADS,
   routingV2SortOnlyKind,
+  withSortOnlyPriceAlert,
   runRoutingV2OutboxReplies,
   type AiDispatchInput,
   type AiDispatchOutcome,
@@ -35,6 +36,7 @@ import { isRetryOutcome, type AiRetryOutcome } from "@/lib/ai-responder/retry";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { recordAiResponderOutcomeForThread } from "@/lib/messages/ai-responder-thread-state";
 import { markInboundMessageState } from "@/lib/messaging/inbound-state";
+import { alertOnTimeOnlyInForce } from "@/lib/sms-classification/routing-v2/flags";
 import { recordRoutingV2Audit } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import type { Database, Json } from "@/lib/supabase/types";
 
@@ -269,34 +271,47 @@ export function errorCode(e: unknown): BackfillErrorCode {
   return e instanceof BackfillItemError ? e.code : "unexpected_error";
 }
 
-type StoredDecision = { status: string; road: string | null; failure_reason: string | null; action: { road: string; steps?: Array<{ kind: string }> } | null };
+type StoredDecision = { status: string; road: string | null; failure_reason: string | null; action: { road: string; steps?: Array<{ kind: string; whenTimeOnlyOff?: boolean }> } | null };
 
-/** What carrying out this stored decision would do under `treatment` (classify-only report). */
-export function wouldDo(d: StoredDecision | null, treatment: Treatment): Pick<ItemResult, "wouldReply" | "wouldDrip" | "wouldAlert" | "wouldHold" | "wouldClose"> {
+/**
+ * Would apply deliver an owner alert from these steps? An alert step marked `whenTimeOnlyOff`
+ * (today's hot alert on a yes) is dropped at send time while "alert only when a time is picked"
+ * is in force (actions.ts / the outbox delivery gate), so the projection drops it too.
+ */
+function deliversAlert(steps: ReadonlyArray<{ kind: string; whenTimeOnlyOff?: boolean }>, timeOnly: boolean): boolean {
+  return steps.some((s) => s.kind === "alert" && !(timeOnly && s.whenTimeOnlyOff === true));
+}
+
+/**
+ * What --apply would do with a stored decision. `timeOnly` = alertOnTimeOnlyInForce for the
+ * property at report time (flags can change before apply: the apply run re-reads them).
+ */
+export function wouldDo(d: StoredDecision | null, treatment: Treatment, timeOnly: boolean): Pick<ItemResult, "wouldReply" | "wouldDrip" | "wouldAlert" | "wouldHold" | "wouldClose"> {
   if (!d) return { wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: false, wouldClose: false };
   const steps = d.action?.steps ?? [];
   const has = (k: string) => steps.some((s) => s.kind === k);
   if (treatment === "sort_only") {
     const kind = routingV2SortOnlyKind(d as never);
+    // A sort-only price text with no alert of its own gets "Named a price" (withSortOnlyPriceAlert).
+    const alertSteps = withSortOnlyPriceAlert((d.action ?? null) as Parameters<typeof withSortOnlyPriceAlert>[0])?.steps ?? [];
     return {
       wouldReply: false, wouldDrip: false,
-      // alert_and_hold always alerts (a hot road with no alert of its own gets "Named a price").
-      wouldAlert: kind === "alert_and_hold" || (has("alert") && (kind === "live_hold" || kind === "live_stop")),
+      wouldAlert: (kind === "alert_and_hold" || kind === "live_hold" || kind === "live_stop") && deliversAlert(alertSteps, timeOnly),
       wouldHold: kind.startsWith("live_") || kind === "alert_and_hold",
       wouldClose: kind === "close_wrong_number" || kind === "close_not_interested",
     };
   }
   if (d.status === "failed") return { wouldReply: false, wouldDrip: false, wouldAlert: false, wouldHold: true, wouldClose: false };
   if (d.action && ROUTING_V2_BACKFILL_HOLD_ROADS.has(d.action.road)) {
-    return { wouldReply: false, wouldDrip: false, wouldAlert: has("alert"), wouldHold: true, wouldClose: false };
+    return { wouldReply: false, wouldDrip: false, wouldAlert: deliversAlert(steps, timeOnly), wouldHold: true, wouldClose: false };
   }
   return {
-    wouldReply: has("reply") || has("wrong_number_close"), wouldDrip: has("drip"), wouldAlert: has("alert"),
+    wouldReply: has("reply") || has("wrong_number_close"), wouldDrip: has("drip"), wouldAlert: deliversAlert(steps, timeOnly),
     wouldHold: has("hold"), wouldClose: has("wrong_number_close"),
   };
 }
 
-async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: string, mode: BackfillMode, treatment: Treatment, classifiedRow: StoredDecision | null): Promise<Omit<ItemResult, "inboundId" | "propertyId" | "ageDays" | "bucket" | "mode" | "treatment" | "outcome" | "error" | "groupChanged" | "appliedWithoutStoredDecision" | "effectsUnknown">> {
+async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: string, mode: BackfillMode, treatment: Treatment, classifiedRow: StoredDecision | null, timeOnly: boolean): Promise<Omit<ItemResult, "inboundId" | "propertyId" | "ageDays" | "bucket" | "mode" | "treatment" | "outcome" | "error" | "groupChanged" | "appliedWithoutStoredDecision" | "effectsUnknown">> {
   const loose = db as unknown as Loose;
   const reads = await Promise.all([
     loose.from("routing_v2_live_decisions").select("status, road, failure_reason, action").eq("inbound_message_id", c.id).maybeSingle(),
@@ -345,7 +360,7 @@ async function readEffects(db: Db, c: Candidate, orgId: string, startedIso: stri
     holdCreated: p?.needs_human_attention === true,
     holdReason: p?.needs_human_attention ? (p.last_ai_escalation_reason ?? null) : null,
     suppressionCreated,
-    ...wouldDo(d, treatment),
+    ...wouldDo(d, treatment, timeOnly),
   };
 }
 
@@ -507,7 +522,7 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
         await runRoutingV2OutboxReplies(db, { propertyId: c.propertyId, limit: 5 });
       }
       const outcomeText = `${outcome.outcome}:${"reason" in outcome ? outcome.reason : ""}`;
-      const effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, classifiedRow as StoredDecision | null);
+      const effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, classifiedRow as StoredDecision | null, alertOnTimeOnlyInForce(state.flags, c.propertyId));
       if ("reason" in outcome && outcome.reason === ROUTING_V2_BACKFILL_CLASSIFY_KEYWORD_HOLD) {
         effects.road = "keyword_hold";
         effects.wouldHold = true;
@@ -527,7 +542,7 @@ export async function runBackfill(db: Db, opts: BackfillOptions, deps: BackfillD
       // Reconcile from the database: an error after delivery must not report the send as zero (Astra review 6).
       let effects: ReturnType<typeof emptyEffects> = emptyEffects();
       let effectsUnknown = false;
-      try { effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, null); } catch { effectsUnknown = true; }
+      try { effects = await readEffects(db, c, opts.orgId, itemStarted, opts.mode, treatment, null, alertOnTimeOnlyInForce(state.flags, c.propertyId)); } catch { effectsUnknown = true; }
       result.items.push({ ...base, ...effects, effectsUnknown, road: effects.road === "not_dispatched" ? "error" : effects.road, outcome: "error", error: errorCode(e) });
     }
     if ((i + 1) % 25 === 0) log(`${i + 1}/${queue.length} dispatched`);
