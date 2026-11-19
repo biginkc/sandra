@@ -141,7 +141,7 @@ export function markdownReport(sha: string, r: BackfillRunResult): string {
       ]));
       if (treatment === "sort_only" && its.some((i) => i.road === "price_check")) {
         lines.push("");
-        lines.push("Note: price_check texts in this group go to Jarrad's queue with the existing \"Named a price\" alert (even \"price too high\", which has no alert of its own live). This is the builder's reading of \"alert hot roads\", pending Jarrad.");
+        lines.push("Note: price_check texts in this group are held for a person. Fair or unclear prices raise their own \"Named a price\" alert; \"price too high\" is held with no alert (Jarrad 2026-11-02).");
       }
       if (holdReasons.size > 0) {
         lines.push("");

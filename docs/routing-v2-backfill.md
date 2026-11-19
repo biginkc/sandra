@@ -10,16 +10,16 @@ backlog.
 | Age of the seller's text | What happens |
 |---|---|
 | 0–14 days (`--text-max-age-days`, default 14) | **Full treatment**, same as a live reply: reply, drip, alerts, holds, suppression. |
-| 15–60 days (`--max-age-days`, default 60) | **Sort only**: no auto reply, no drip. Stops are handled (suppressed or held), legal / needs-a-person texts are held, wrong person / sold / tenant and not interested are closed on that property, bad numbers are marked, and hot texts (yes, offer, okay, price, call me, said they'd call, any alert road) raise their alert and go to Jarrad's queue (held for a person). Everything else is recorded only. |
+| 15–60 days (`--max-age-days`, default 60) | **Sort only**: no auto reply, no drip. Stops are handled (suppressed or held), legal / needs-a-person texts are held, wrong person / sold / tenant and not interested are closed on that property, bad numbers are marked, and hot texts (yes, offer, okay, price, call me, said they'd call, any alert road) raise their own alert and go to Jarrad's queue (held for a person). Everything else is recorded only. |
 
 `--text-max-age-days` above 14 is refused unless `--i-know-this-widens-texting` is also passed.
 Age is measured on the database clock in whole days (14.9 days is still day 14, full treatment),
 and the group is decided when each text is dispatched, so a text that turns 15 days old during a
 long run gets sort only.
 
-**Pending Jarrad:** in the sort-only group, every price text (including "price too high", which
-has no alert of its own live) goes to Jarrad's queue with the existing "Named a price" alert. That
-is the builder's reading of "alert hot roads"; the report repeats this note.
+**Price texts in the sort-only group (Jarrad, 2026-11-02):** every price text is held for a person.
+A fair or unclear price raises its own "Named a price" alert; "price too high" (no alert of its own
+live) is held with no alert. The report repeats this note.
 
 One road is held for a person even in the 0–14 day group, because its approved reply only makes
 sense right after the seller's message:
