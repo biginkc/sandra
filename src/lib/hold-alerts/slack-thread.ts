@@ -1,4 +1,5 @@
 import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import { reportError } from "@/lib/errors/report";
 
 /**
  * Slack alert thread (Jarrad approved 2026-11-18): Slack alert DMs show the
@@ -32,7 +33,7 @@ const COLUMNS = "direction, body, created_at, status";
 
 /**
  * The last THREAD_MAX_MESSAGES SMS with this seller from the past
- * THREAD_LOOKBACK_DAYS days, oldest first. By the seller's phone (from the
+ * THREAD_LOOKBACK_DAYS days, newest first (Jarrad 2026-11-18). By the seller's phone (from the
  * alert's inbound message) when known, else by the property. Throws on a query
  * error; the caller fails open.
  */
@@ -78,7 +79,7 @@ export async function loadSlackThread(
   return toThread((data ?? []) as Row[], nowMs);
 }
 
-/** Rows (any order) → at most THREAD_MAX_MESSAGES real messages, oldest first. */
+/** Rows (any order) → at most THREAD_MAX_MESSAGES real messages, newest first. */
 export function toThread(rows: readonly Row[], nowMs: number): ThreadMessage[] {
   return rows
     .filter((r) => r.direction === "inbound" || r.direction === "outbound")
@@ -87,7 +88,6 @@ export function toThread(rows: readonly Row[], nowMs: number): ThreadMessage[] {
     .filter((r) => (r.body ?? "").trim().length > 0)
     .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
     .slice(0, THREAD_MAX_MESSAGES)
-    .reverse()
     .map((r) => ({ direction: r.direction as ThreadMessage["direction"], body: r.body ?? "", createdAt: r.created_at }));
 }
 
@@ -122,8 +122,20 @@ export function buildSlackAlertBlocks(headline: SlackHeadline, thread: readonly 
   if (headline.before) head.push({ type: "text", text: headline.before });
   head.push({ type: "link", url: headline.url, text: headline.linkText });
   if (headline.after) head.push({ type: "text", text: headline.after });
-  const sections: SlackBlock[] = [{ type: "rich_text_section", elements: head }];
-  for (const m of thread.slice(-THREAD_MAX_MESSAGES)) {
+  return [{ type: "rich_text", elements: threadSections([{ type: "rich_text_section", elements: head }], thread, nowMs) }];
+}
+
+/**
+ * The thread alone, for Slack DMs that already have their own headline blocks
+ * (task assigned, appointment reminder, marked done). Empty thread → no block.
+ */
+export function buildSlackThreadBlocks(thread: readonly ThreadMessage[], nowMs: number): SlackBlock[] {
+  if (thread.length === 0) return [];
+  return [{ type: "rich_text", elements: threadSections([], thread, nowMs) }];
+}
+
+function threadSections(sections: SlackBlock[], thread: readonly ThreadMessage[], nowMs: number): SlackBlock[] {
+  for (const m of thread.slice(0, THREAD_MAX_MESSAGES)) {
     const label = `${m.direction === "outbound" ? "US" : "SELLER"} ${formatThreadTime(m.createdAt, nowMs)}: `;
     const elements: SlackBlock[] = [];
     elements.push({ type: "text", text: `${label}${threadBody(m.body)}` });
@@ -131,5 +143,53 @@ export function buildSlackAlertBlocks(headline: SlackHeadline, thread: readonly 
   }
   // A trailing newline per line keeps each message on its own row in every Slack client.
   for (const s of sections.slice(0, -1)) s.elements.push({ type: "text", text: "\n" });
-  return [{ type: "rich_text", elements: sections }];
+  return sections;
+}
+
+/** One deadline for every Slack thread lookup. */
+export const SLACK_THREAD_TIMEOUT_MS = 3_000;
+
+/**
+ * Runs a thread lookup with the shared deadline. Never throws: a missing
+ * loader, an error or the deadline all yield [] (the message goes without a
+ * thread). Every Slack sender calls this before its provider call.
+ */
+export async function loadThreadWithDeadline(
+  load: (() => Promise<ThreadMessage[]> | undefined) | undefined,
+  tags: Record<string, string>,
+): Promise<ThreadMessage[]> {
+  if (!load) return [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const deadline = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), SLACK_THREAD_TIMEOUT_MS);
+    });
+    const loaded = await Promise.race([Promise.resolve().then(load), deadline]);
+    if (loaded === "timeout") {
+      reportError(new Error("Slack thread lookup timed out"), { tags });
+      return [];
+    }
+    return loaded ?? [];
+  } catch (error) {
+    reportError(error, { tags });
+    return [];
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Thread blocks for a lead-related Slack DM (by property). [] when there is no
+ * property or nothing to show. Fail-open, bounded by SLACK_THREAD_TIMEOUT_MS.
+ */
+export async function loadLeadThreadBlocks(
+  db: LooseSupabase,
+  orgId: string | null | undefined,
+  propertyId: string | null | undefined,
+  surface: string,
+  nowMs: number = Date.now(),
+): Promise<SlackBlock[]> {
+  if (!orgId || !propertyId) return [];
+  const thread = await loadThreadWithDeadline(() => loadSlackThread(db, orgId, { propertyId }, nowMs), { surface });
+  return buildSlackThreadBlocks(thread, nowMs);
 }

@@ -63,16 +63,17 @@ describe("Slack headline", () => {
 });
 
 describe("thread lines", () => {
+  // Newest first, as toThread returns it.
   const thread = [
-    msg("outbound", "Hi there, synthetic opener.", "2026-11-18T18:52:00.000Z"),
     msg("inbound", "What is   your\noffer?", "2026-11-18T19:44:00.000Z"),
+    msg("outbound", "Hi there, synthetic opener.", "2026-11-18T18:52:00.000Z"),
   ];
 
-  it("US / SELLER labels, no color element, oldest first, Chicago time", () => {
-    const [, us, seller] = sections(buildSlackAlertBlocks(hotPromotionSlackHeadline(promo, URL_), thread, NOW));
-    expect(lineText(us)).toBe("US 12:52 pm: Hi there, synthetic opener.\n");
+  it("US / SELLER labels, no color element, newest first right under the headline, Chicago time", () => {
+    const [, seller, us] = sections(buildSlackAlertBlocks(hotPromotionSlackHeadline(promo, URL_), thread, NOW));
+    expect(lineText(seller)).toBe("SELLER 1:44 pm: What is your offer?\n");
     expect([us, seller].some((l) => (l.elements as SlackBlock[]).some((e) => e.type === "color"))).toBe(false);
-    expect(lineText(seller)).toBe("SELLER 1:44 pm: What is your offer?");
+    expect(lineText(us)).toBe("US 12:52 pm: Hi there, synthetic opener.");
   });
 
   it("prefixes the date when not today in Chicago", () => {
@@ -85,7 +86,7 @@ describe("thread lines", () => {
     expect(lineText(line)).toBe(`SELLER 1:00 pm: ${"x".repeat(500)}…`);
   });
 
-  it("toThread caps at the last 10, oldest first, drops unsent outbound", () => {
+  it("toThread keeps the newest 10, newest first, drops unsent outbound", () => {
     const rows = Array.from({ length: 14 }, (_, i) => ({
       direction: i % 2 ? "inbound" : "outbound",
       body: `m${i}`,
@@ -94,7 +95,7 @@ describe("thread lines", () => {
     }));
     rows.push({ direction: "outbound", body: "queued later", created_at: new Date(NOW - 1000).toISOString(), status: "queued" });
     const out = toThread(rows, NOW);
-    expect(out.map((m) => m.body)).toEqual(["m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12", "m13"]);
+    expect(out.map((m) => m.body)).toEqual(["m13", "m12", "m11", "m10", "m9", "m8", "m7", "m6", "m5", "m4"]);
   });
 
   it("empty thread → just the linked headline", () => {
@@ -160,7 +161,7 @@ describe("only texts that actually went out", () => {
       { direction: "outbound", body: "synthetic delivered", created_at: new Date(NOW - 1500).toISOString(), status: "delivered" },
       { direction: "inbound", body: "synthetic reply", created_at: new Date(NOW - 1000).toISOString(), status: "received" },
     ];
-    expect(toThread(rows, NOW).map((m) => m.body)).toEqual(["synthetic delivered", "synthetic reply"]);
+    expect(toThread(rows, NOW).map((m) => m.body)).toEqual(["synthetic reply", "synthetic delivered"]);
   });
 
   it("loadSlackThread filters eligibility in the query, before the limit", async () => {

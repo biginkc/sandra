@@ -10,7 +10,7 @@ import {
   slackFirstText,
   smsText,
 } from "./messages";
-import { buildSlackAlertBlocks, type SlackHeadline, type ThreadLookup, type ThreadMessage } from "./slack-thread";
+import { buildSlackAlertBlocks, loadThreadWithDeadline, SLACK_THREAD_TIMEOUT_MS, type SlackHeadline, type ThreadLookup } from "./slack-thread";
 import {
   MAX_ATTEMPTS,
   ROUTE_MAX_DURATION_MS,
@@ -493,29 +493,15 @@ function capFor(deps: HoldAlertDeps, input: EnsureInput): CapBucket | null {
 }
 
 /** Max time the Slack thread lookup may add to one alert send. */
-export const SLACK_THREAD_TIMEOUT_MS = 3_000;
+export { SLACK_THREAD_TIMEOUT_MS };
 
 /**
  * Slack alert blocks: linked headline + recent thread (Jarrad 2026-11-18). Fails
- * open: a missing loader or a lookup error sends the linked headline alone.
+ * open: a missing loader, a lookup error or the shared deadline sends the
+ * linked headline alone.
  */
 export async function slackBlocks(deps: HoldAlertDeps, orgId: string, headline: SlackHeadline, lookup: ThreadLookup) {
-  let thread: ThreadMessage[] = [];
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    // Bounded: this runs after the delivery is claimed, so a stalled lookup must never eat
-    // the route's time budget and strand the claim. Past the deadline, send the headline alone.
-    const deadline = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), SLACK_THREAD_TIMEOUT_MS);
-    });
-    const loaded = await Promise.race([Promise.resolve(deps.loadSlackThread?.(orgId, lookup)), deadline]);
-    if (loaded === "timeout") reportError(new Error("Slack alert thread lookup timed out"), { tags: { surface: "hold_alert_slack_thread", orgId } });
-    else thread = loaded ?? [];
-  } catch (error) {
-    reportError(error, { tags: { surface: "hold_alert_slack_thread", orgId } });
-    thread = [];
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  const load = deps.loadSlackThread;
+  const thread = await loadThreadWithDeadline(load ? () => load(orgId, lookup) : undefined, { surface: "hold_alert_slack_thread", orgId });
   return buildSlackAlertBlocks(headline, thread, deps.now().getTime());
 }

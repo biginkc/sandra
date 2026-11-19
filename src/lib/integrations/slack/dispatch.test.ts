@@ -33,6 +33,8 @@ vi.mock("@/lib/integrations/tokens/store", async () => {
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("@/lib/tasks", () => ({ completeTask }));
 vi.mock("@/lib/errors/report", () => ({ reportError }));
+const { loadLeadThreadBlocks } = vi.hoisted(() => ({ loadLeadThreadBlocks: vi.fn() }));
+vi.mock("@/lib/hold-alerts/slack-thread", () => ({ loadLeadThreadBlocks }));
 vi.mock("@slack/web-api", () => ({
   WebClient: function MockWebClient(token: string, options?: unknown) {
     webClientConstructor(token, options);
@@ -132,6 +134,69 @@ describe("slack/dispatch", () => {
     chatPostMessage.mockResolvedValue({ ts: "1710000000.000100" });
     chatUpdate.mockResolvedValue({ ok: true });
     completeTask.mockResolvedValue({ ok: true, data: { id: dispatchInput.taskId } });
+    loadLeadThreadBlocks.mockResolvedValue([]);
+  });
+
+  describe("lead thread (Jarrad 2026-11-18)", () => {
+    // Synthetic text only.
+    const THREAD = [{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "SELLER 1:00 pm: synthetic" }] }] }];
+    const leadTask = { org_id: "org-1", related_property_id: "prop-1" };
+
+    it("task assigned: address links the lead, thread appended, text + buttons unchanged", async () => {
+      createAdminClient.mockReturnValue(makeSupabase({ taskRow: leadTask }));
+      loadLeadThreadBlocks.mockResolvedValue(THREAD);
+      await dispatchTaskAssignedSlack(dispatchInput);
+      const arg = chatPostMessage.mock.calls[0][0];
+      expect(arg.text).toBe("Task assigned: Call the owner");
+      expect(JSON.stringify(arg.blocks)).toContain("|123 Slack Test Ln>");
+      expect(JSON.stringify(arg.blocks)).toContain("/leads/prop-1");
+      expect(arg.blocks.some((b: { type: string }) => b.type === "actions")).toBe(true);
+      expect(arg.blocks.at(-1)).toEqual(THREAD[0]);
+      expect(loadLeadThreadBlocks).toHaveBeenCalledWith(expect.anything(), "org-1", "prop-1", expect.any(String));
+    });
+
+    it("task assigned without a property: sent exactly as before", async () => {
+      createAdminClient.mockReturnValue(makeSupabase({ taskRow: { org_id: "org-1", related_property_id: null } }));
+      await dispatchTaskAssignedSlack(dispatchInput);
+      const arg = chatPostMessage.mock.calls[0][0];
+      expect(JSON.stringify(arg.blocks)).not.toContain("/leads/");
+      expect(arg.blocks).toHaveLength(3);
+      expect(loadLeadThreadBlocks).not.toHaveBeenCalled();
+    });
+
+    it("thread trouble never fails the send", async () => {
+      createAdminClient.mockReturnValue(makeSupabase({ taskRow: leadTask }));
+      loadLeadThreadBlocks.mockRejectedValue(new Error("db down"));
+      await expect(dispatchTaskAssignedSlack(dispatchInput)).resolves.toMatchObject({ sent: true });
+    });
+
+    it("appointment reminder appends the thread; outcome unchanged", async () => {
+      createAdminClient.mockReturnValue(makeSupabase({ taskRow: leadTask }));
+      loadLeadThreadBlocks.mockResolvedValue(THREAD);
+      const result = await dispatchAppointmentReminderSlack({
+        taskId: dispatchInput.taskId,
+        assigneeId: "user-1",
+        taskTitle: "Walkthrough",
+        dueAt: "2026-05-10T15:00:00.000Z",
+        timezone: "America/Chicago",
+        deepLink: "https://app.example.com/leads/prop-1",
+        slackEnabled: true,
+      });
+      expect(result.outcome).toBe("sent");
+      expect(chatPostMessage.mock.calls[0][0].blocks.at(-1)).toEqual(THREAD[0]);
+    });
+
+    it("marked-done refresh keeps the linked address and thread", async () => {
+      createAdminClient.mockReturnValue(
+        makeSupabase({ taskRow: { id: "t", assignee_id: "user-1", title: "Call", ...leadTask }, propertyRow: { address: "123 Slack Test Ln" } }),
+      );
+      loadLeadThreadBlocks.mockResolvedValue(THREAD);
+      await expect(refreshSlackMessage({ channel: "D123", messageTs: "1.2", taskId: "t", doneByUserName: "Pat" })).resolves.toEqual({ ok: true });
+      const arg = chatUpdate.mock.calls[0][0];
+      expect(JSON.stringify(arg.blocks)).toContain("|123 Slack Test Ln>");
+      expect(arg.blocks.at(-1)).toEqual(THREAD[0]);
+      expect(arg.text).toBe("Marked done");
+    });
   });
 
   it("dispatchTaskAssignedSlack short-circuits when user pref disabled", async () => {

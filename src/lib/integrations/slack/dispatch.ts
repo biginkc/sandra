@@ -1,5 +1,6 @@
 import { buildLeadDeepLink } from "@/lib/leads/deep-link";
 import { WebClient } from "@slack/web-api";
+import type { KnownBlock } from "@slack/types";
 
 import { reportError } from "@/lib/errors/report";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
@@ -8,6 +9,8 @@ import { formatTimeOfDay, humanDueDate } from "@/lib/notifications/format";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeTimeZone } from "@/lib/time/zoned";
 import { completeTask } from "@/lib/tasks";
+import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import { loadLeadThreadBlocks } from "@/lib/hold-alerts/slack-thread";
 
 import {
   buildAppointmentReminderBlocks,
@@ -97,14 +100,21 @@ export async function dispatchTaskAssignedSlack(
     if (!channel) return { sent: false, reason: "error" };
 
     const taskTitle = truncateTaskTitle(input.taskTitle);
-    const blocks = buildTaskAssignedBlocks({
-      taskTitle,
-      propertyAddress: input.propertyAddress,
-      dueLabel: humanDueDate(input.dueAt, undefined, normalizeTimeZone(input.timezone)),
-      taskTypeLabel: TASK_TYPE_LABELS[input.taskType] ?? "Task",
-      taskId: input.taskId,
-      deepLink: input.deepLink,
-    });
+    // Lead-related DM (Jarrad 2026-11-18): address links to the lead, recent
+    // text thread appended. Fail-open: no property / lookup trouble = today's message.
+    const lead = await loadTaskLead(admin, input.taskId, "slack_task_dispatch_thread");
+    const blocks = [
+      ...buildTaskAssignedBlocks({
+        taskTitle,
+        propertyAddress: input.propertyAddress,
+        dueLabel: humanDueDate(input.dueAt, undefined, normalizeTimeZone(input.timezone)),
+        taskTypeLabel: TASK_TYPE_LABELS[input.taskType] ?? "Task",
+        taskId: input.taskId,
+        deepLink: input.deepLink,
+        leadLink: lead.leadLink,
+      }),
+      ...(lead.threadBlocks as KnownBlock[]),
+    ];
     const posted = await slack.chat.postMessage({
       channel,
       blocks,
@@ -225,11 +235,16 @@ export async function dispatchAppointmentReminderSlack(
 
   const taskTitle = truncateTaskTitle(input.taskTitle);
   const timeLabel = formatTimeOfDay(input.dueAt, normalizeTimeZone(input.timezone));
-  const blocks = buildAppointmentReminderBlocks({
-    taskTitle,
-    timeLabel,
-    deepLink: input.deepLink,
-  });
+  // Fail-open + bounded (never throws): appended thread for a lead's appointment.
+  const lead = await loadTaskLead(createAdminClient(), input.taskId, "slack_appointment_reminder_thread");
+  const blocks = [
+    ...buildAppointmentReminderBlocks({
+      taskTitle,
+      timeLabel,
+      deepLink: input.deepLink,
+    }),
+    ...(lead.threadBlocks as KnownBlock[]),
+  ];
 
   try {
     const posted = await slack.chat.postMessage({
@@ -318,7 +333,7 @@ export async function refreshSlackMessage(input: {
     const admin = createAdminClient();
     const { data: task, error } = await admin
       .from("tasks")
-      .select("id, assignee_id, title, related_property_id")
+      .select("id, assignee_id, title, related_property_id, org_id")
       .eq("id", input.taskId)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -337,16 +352,26 @@ export async function refreshSlackMessage(input: {
       ? await loadPropertyAddress(admin, task.related_property_id)
       : "Personal block";
     const deepLink = buildLeadDeepLink(task.related_property_id);
+    const threadBlocks = await loadLeadThreadBlocks(
+      admin as unknown as LooseSupabase,
+      task.org_id,
+      task.related_property_id,
+      "slack_task_refresh_thread",
+    );
     const slack = new WebClient(token.accessToken.reveal());
     await slack.chat.update({
       channel: input.channel,
       ts: input.messageTs,
-      blocks: buildMarkedDoneBlocks({
-        taskTitle: task.title,
-        propertyAddress,
-        doneByUserName: input.doneByUserName,
-        deepLink,
-      }),
+      blocks: [
+        ...buildMarkedDoneBlocks({
+          taskTitle: task.title,
+          propertyAddress,
+          doneByUserName: input.doneByUserName,
+          deepLink,
+          leadLink: task.related_property_id ? buildLeadDeepLink(task.related_property_id) : null,
+        }),
+        ...(threadBlocks as KnownBlock[]),
+      ],
       text: "Marked done",
     });
 
@@ -400,4 +425,33 @@ export function buildAppointmentDeepLink(
   // Retained for existing callers; a contact is never a lead identifier.
   void _contactId;
   return buildLeadDeepLink(propertyId);
+}
+
+/**
+ * The task's lead (if any) for a Slack DM: the lead link for the address and
+ * the recent text thread. Never throws; any trouble = no link, no thread.
+ */
+async function loadTaskLead(
+  admin: AdminClient,
+  taskId: string,
+  surface: string,
+): Promise<{ leadLink: string | null; threadBlocks: unknown[] }> {
+  try {
+    const { data, error } = await admin
+      .from("tasks")
+      .select("org_id, related_property_id")
+      .eq("id", taskId)
+      .maybeSingle();
+    if (error || !data?.related_property_id) return { leadLink: null, threadBlocks: [] };
+    const threadBlocks = await loadLeadThreadBlocks(
+      admin as unknown as LooseSupabase,
+      data.org_id,
+      data.related_property_id,
+      surface,
+    );
+    return { leadLink: buildLeadDeepLink(data.related_property_id), threadBlocks };
+  } catch (error) {
+    reportError(error, { tags: { surface } });
+    return { leadLink: null, threadBlocks: [] };
+  }
 }
