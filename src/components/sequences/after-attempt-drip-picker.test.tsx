@@ -65,3 +65,9 @@ it("refreshes and stays open after a thrown switch error", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent("Check the current drip before retrying");
   expect(api.listDripProgress).toHaveBeenCalledTimes(2); expect(onEnrolled).not.toHaveBeenCalled();
 });
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
+});

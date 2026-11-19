@@ -1,13 +1,13 @@
 import { isValidElement, type ReactNode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ memberships: vi.fn(), roster: vi.fn(), callingConfig: vi.fn(), dialpadRoute: vi.fn() }));
+const mocks = vi.hoisted(() => ({ memberships: vi.fn(), roster: vi.fn(), callingConfig: vi.fn(), dialpadRoute: vi.fn(), badgeState: vi.fn() }));
 vi.mock("@/lib/dialpad-cti/call-route-server", () => ({ getDialpadCallRoute: mocks.dialpadRoute }));
 vi.mock("@/components/dialpad/dialpad-call-provider", () => ({ DialpadCallProvider: () => null }));
 vi.mock("@/lib/direct-calling/actions", () => ({ getCallingConfigForCurrentUser: mocks.callingConfig }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({ auth: { getUser: async () => ({ data: { user: { id: "rep", email: "rep@example.test" } } }) } }) }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships: mocks.memberships }));
-vi.mock("@/lib/my-leads/queries", () => ({ getAcquisitionRoster: mocks.roster, getAcquisitionBadge: async () => null }));
+vi.mock("@/lib/my-leads/queries", () => ({ getAcquisitionRoster: mocks.roster, getAcquisitionBadgeState: mocks.badgeState }));
 vi.mock("@/lib/recordings/data", () => ({ recordingViewer: async () => null }));
 vi.mock("@/lib/auth/allowlist", () => ({ isAdminEmail: () => false }));
 vi.mock("./my-leads/nav-actions", () => ({ refreshMyLeadsBadge: vi.fn() }));
@@ -38,6 +38,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.callingConfig.mockResolvedValue({ transport: "default" });
   mocks.dialpadRoute.mockResolvedValue("softphone");
+  mocks.badgeState.mockResolvedValue({ count: 0, needsAttention: false });
+  mocks.roster.mockReset();
   mocks.memberships.mockResolvedValue([{ user_id: "rep", org_id: "org", role: "member", acquisitions_enabled: true, access_status: "active" }]);
 });
 
@@ -109,4 +111,17 @@ it("keeps the softphone route when the viewer has no single organization", async
   mocks.memberships.mockResolvedValue([]);
   expect(dialpadEnabled(await DashboardLayout({ children: <div>Page</div> }))).toBe(false);
   expect(mocks.dialpadRoute).not.toHaveBeenCalled();
+});
+
+it.each([
+  { needsAttention: true, showMyLeads: true, expected: true },
+  { needsAttention: false, showMyLeads: true, expected: false },
+  { needsAttention: true, showMyLeads: false, expected: false },
+])("passes the needs-attention badge label flag to both navigation surfaces ($expected)", async ({ needsAttention, showMyLeads, expected }) => {
+  mocks.badgeState.mockResolvedValue({ count: 4, needsAttention });
+  if (showMyLeads) mocks.roster.mockResolvedValue({ viewer: { userId: "rep", isOwner: false }, roster: { settings: { enabled: false }, members: [{ id: "rep", active: true, acquisitionsEnabled: true }] } });
+  else { mocks.memberships.mockRejectedValue(new Error("membership unavailable")); mocks.roster.mockRejectedValue(new Error("roster unavailable")); }
+  const nav = navigationProps(await DashboardLayout({ children: <div>Page</div> }));
+  expect(nav).toHaveLength(2);
+  for (const props of nav) expect(props).toMatchObject({ showMyLeads, acquisitionBadgeNeedsAttention: expected });
 });

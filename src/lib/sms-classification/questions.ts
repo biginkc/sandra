@@ -1,7 +1,7 @@
 import type { JevOutcome } from "./types";
 
 /** Version the rubric as well as the response shape: old scores are not interchangeable. */
-export const JEV_SCHEMA_VERSION = "2";
+export const JEV_SCHEMA_VERSION = "4";
 export const JEV_POLICY_VERSION = "2026-09-20-new-lead-review";
 export const JEV_MODEL = "jev-1.13.0";
 
@@ -28,6 +28,21 @@ export const OUTCOME_CRITERIA: Record<JevOutcome, string> = {
     "Explicit formal/legal demand: attorney/lawyer, legal action, Do Not Call registry, TCPA, or a legal demand to cease all contact. Hostility alone is not dnc. Takes precedence over earlier selling interest.",
   unclear:
     "The available evidence does not support a category, is contradictory, or lacks necessary context. Do not invent facts or treat an outbound-only invitation as seller interest.",
+};
+
+/**
+ * Jev question id for "did the seller ask how we got their number". The
+ * instructions and criteria below are human-approved text (Jarrad, 2026-10-07)
+ * and pinned verbatim by tests; do not edit them without a new approval.
+ */
+export const NUMBER_SOURCE_QUESTION_ID = "asked_how_number_obtained";
+export const NUMBER_SOURCE_QUESTION: ChoiceQuestion = {
+  type: "choice",
+  instructions: "Did the seller ask anything about how we obtained the phone number?",
+  criteria: {
+    yes: "The seller asks how, where or from whom we got their number.",
+    no: "The seller does not ask about this.",
+  },
 };
 
 export function buildQuestions(includeReplyIntent: boolean): Record<string, ChoiceQuestion> {
@@ -61,6 +76,30 @@ export function buildQuestions(includeReplyIntent: boolean): Record<string, Choi
         needs_review: "Other evidence requires human review.",
         not_applicable: "No human follow-up indicated.",
         uncertain: "Insufficient evidence to choose a reason.",
+      },
+    },
+    [NUMBER_SOURCE_QUESTION_ID]: NUMBER_SOURCE_QUESTION,
+    // Nurture routing questions. Texts approved verbatim by Jarrad (2026-10-07); do not edit without a human approving the exact new text.
+    ready_timeframe: {
+      type: "choice",
+      instructions:
+        "If the seller indicates when they might be ready to sell, which timeframe does the latest inbound message support?",
+      criteria: {
+        within_30_days: "Ready or open to selling within about a month.",
+        one_to_six_months: "Indicates roughly one to six months.",
+        six_to_twelve_months: "Indicates roughly six to twelve months.",
+        over_a_year: "Indicates more than a year away.",
+        not_stated: "No timeframe given.",
+        uncertain: "A timeframe is mentioned but cannot be determined.",
+      },
+    },
+    listing_status: {
+      type: "choice",
+      instructions: "Does the seller say the property is currently listed for sale or being shown?",
+      criteria: {
+        listed: "The seller says it is listed with an agent or has showings.",
+        not_listed_or_not_stated: "The seller does not say it is listed.",
+        uncertain: "Cannot tell from the message.",
       },
     },
   };

@@ -26,7 +26,8 @@ export type SchemaFeature =
   | "offer_projection"
   | "call_facts"
   | "post_call_extras_proof"
-  | "dialpad_call_audio";
+  | "dialpad_call_audio"
+  | "unified_queue";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -184,6 +185,17 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
       "my_leads_feature_flags.recording_download_canary_call_ids",
       "my_leads_feature_flags.audio_consumers",
     ],
+  },
+  // My Leads unified work queue (Phase B1): the classifier read functions, the no-expiry pin, Dismiss, and the org switch.
+  unified_queue: {
+    functions: [
+      "public.fn_my_leads_work_page(uuid,uuid,text,text,text,text,integer,integer,timestamptz)",
+      "public.fn_my_leads_work_facts(uuid,uuid,uuid[],timestamptz)",
+      "public.fn_my_leads_badge_v2(timestamptz)",
+      "public.fn_set_my_leads_pin(uuid,uuid,uuid,text)",
+      "public.fn_dismiss_my_leads_broken(uuid,uuid,uuid,uuid)",
+    ],
+    columns: ["my_leads_feature_flags.unified_queue"],
   },
 };
 

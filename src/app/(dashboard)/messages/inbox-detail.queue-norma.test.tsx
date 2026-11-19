@@ -88,6 +88,7 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({
 
 // Server-action modules ("use server" at top) cannot be imported in jsdom —
 // they pull in next/server's `after` and the Supabase server client.
+vi.mock("../leads/send-sms-stamped", () => ({ sendSmsFromLeadStamped: vi.fn() }));
 vi.mock("../leads/actions", () => ({
   listFromNumbers: vi.fn(async () => ({ ok: true, data: [] })),
   sendSmsFromLead: vi.fn(),
@@ -251,4 +252,10 @@ describe("<InboxDetail /> Queue Norma action (plan UI: Messages thread action on
     render(<InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />);
     expect(screen.getByTestId("inbox-detail-queue-norma")).toHaveAttribute("data-property-id", "prop-q3");
   });
+});
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
 });

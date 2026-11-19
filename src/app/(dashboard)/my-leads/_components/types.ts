@@ -185,6 +185,8 @@ export type MyLeadSmsMessage = {
   createdLabel: string
   deliveryStatus: string
   attachmentCount: number
+  /** Who sent an outbound text when it was not a person (additive; absent on older payloads). */
+  automation?: "drip" | "campaign" | "sandra" | null
 }
 
 export type MyLeadDetailGroup<T> = {

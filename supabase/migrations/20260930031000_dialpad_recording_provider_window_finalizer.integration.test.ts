@@ -506,16 +506,16 @@ describe('provider-window finalizer migration', () => {
     expect(input.rows[0]!.v.selectedSummary?.mappingLowerSlopeUsPerSample).toBe(62.5);
     expect(input.rows[0]!.v.selectedSummary?.mappingUpperSlopeUsPerSample).toBe(62.5);
     expect(input.rows[0]!.v.sampleWindow).toEqual({ lowerSample: 0, upperSample: 4_800_000 });
-    await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,'0'.repeat(64)])).rejects.toMatchObject({code:'40001'});
+    await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,'0'.repeat(64)])).rejects.toMatchObject({code:'DPR01'});
     await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,input.rows[0]!.v.inputDigest]);
     await replica(`update public.dialpad_recording_timing_records set record=record || '{"lateNote":"changed"}'::jsonb where capture_id=$1 and org_id=$2 and stream='exchange' and seq=0`, [captureId, ORG]);
     const timingChanged = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,thresholdPolicy]);
     expect(timingChanged.rows[0]!.v.inputDigest).not.toBe(input.rows[0]!.v.inputDigest);
     const stale = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_provider_window_result($1,$2,$3) v',[ORG,OWNER,captureId]);
     expect(stale.rows[0]!.v).toMatchObject({ status: 'stale', currentAtRead: false });
-    await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,input.rows[0]!.v.inputDigest])).rejects.toMatchObject({code:'40001'});
+    await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,input.rows[0]!.v.inputDigest])).rejects.toMatchObject({code:'DPR01'});
     await replica(`insert into public.dialpad_recording_vad_ranges(capture_id,org_id,track,epoch,batch_id,range_index,start_sample,end_sample,evidence_ref) select capture_id,org_id,'tab',epoch,batch_id,1,4_800_000,4_800_001,'late' from public.dialpad_recording_vad_ranges where capture_id=$1 limit 1`,[captureId]);
-    await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,input.rows[0]!.v.inputDigest])).rejects.toMatchObject({code:'40001'});
+    await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,input.rows[0]!.v.inputDigest])).rejects.toMatchObject({code:'DPR01'});
   });
 
   it('preserves the strict threshold for a valid 320-frame EOF at 4800001', async () => {

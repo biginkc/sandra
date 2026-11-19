@@ -1,3 +1,5 @@
+import { attachHotAlertTimes } from "./hot-alert-times";
+import { fetchAllKeyset } from "./paged";
 import type {
   DeadLetterInfo,
   HeaderStats,
@@ -159,9 +161,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
   }
 
   const drafts = [...(input.drafts ?? [])].sort(
-    (x, y) =>
-      Date.parse(x.created_at) - Date.parse(y.created_at) ||
-      x.id.localeCompare(y.id),
+    (x, y) => compareInstants(x.created_at, y.created_at) || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0),
   );
   for (const d of drafts) {
     const ref =
@@ -202,7 +202,9 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
           a.conversations.has(candidate.conversation_id));
       if (
         matches &&
-        (!run || Date.parse(candidate.started_at) > Date.parse(run.started_at))
+        (!run ||
+          compareInstants(candidate.started_at, run.started_at) > 0 ||
+          (compareInstants(candidate.started_at, run.started_at) === 0 && candidate.id > run.id))
       ) {
         run = candidate;
       }
@@ -212,7 +214,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const inbound = input.inboundAfter?.get(propertyId);
     if (inbound) a.alertTimes.push(inbound);
     const since =
-      [...a.times].sort((x, y) => Date.parse(x) - Date.parse(y))[0] ?? null;
+      [...a.times].sort((x, y) => compareInstants(x, y))[0] ?? null;
     const sources = order.filter((s) => a.sources.has(s));
     // The hold's effective start, for alerting only: the NEWEST reliable instant (flag start,
     // pending decision/review/draft, later seller message). Null = nothing reliable known.
@@ -233,6 +235,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
             draft: {
               id: a.draft.id,
               inbound_message_id: a.draft.inbound_message_id,
+              run_id: a.draft.run_id,
               ...(a.draft.body !== undefined ? { body: a.draft.body } : {}),
               ...(a.draft.edited_body !== undefined ? { edited_body: a.draft.edited_body } : {}),
               ...(a.draft.edited_at !== undefined ? { edited_at: a.draft.edited_at } : {}),
@@ -249,6 +252,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
       since,
+      last_activity:
+        [...a.times, ...a.alertTimes].sort((x, y) => compareInstants(y, x))[0] ?? null,
       alert_since: alertSince,
       ...(a.flagReason ? { flag_reason: a.flagReason } : {}),
       reason:
@@ -526,11 +531,11 @@ const ALERT_ROW_CAP = 1000;
  * than this drops out of the lookback and is not nudged.
  */
 export const ALERT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
-const PROPERTY_COLUMNS =
+export const PROPERTY_COLUMNS =
   "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at, needs_human_attention_since";
-const DECISION_COLUMNS = "property_id, conversation_id, source_inbound_message_id, created_at";
-const REVIEW_COLUMNS = "property_id, conversation_id, source_inbound_message_id, disposition, created_at";
-const draftColumns = (includeBody: boolean) =>
+export const DECISION_COLUMNS = "property_id, conversation_id, source_inbound_message_id, created_at";
+export const REVIEW_COLUMNS = "property_id, conversation_id, source_inbound_message_id, disposition, created_at";
+export const draftColumns = (includeBody: boolean) =>
   includeBody
     ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body, edited_at"
     : "id, property_id, conversation_id, inbound_message_id, run_id, created_at";
@@ -728,6 +733,7 @@ export async function loadMessagesV2Data(
             .select("*")
             .eq("org_id", orgId)
             .order("started_at", { ascending: false })
+            .order("id", { ascending: false })
             .limit(MAX_RUNS),
       // Oldest first BEFORE the limit, so truncation drops the newest holds,
       // never the ones that have waited longest. id is the deterministic tiebreak.
@@ -865,21 +871,22 @@ export async function loadMessagesV2Data(
     ? await loadAlertSources(supabase, orgId, opts.alertsSince, !!opts.includeDraftBody, nowMs)
     : null;
   // A failed query is reported as failed, never silently as "no holds".
+  const preSources = alertSources;
   const properties = (
-    alertSources
-      ? alertSources.properties
+    preSources
+      ? preSources.properties
       : flaggedRes.error
         ? []
         : (flaggedRes.data ?? [])
   ) as HoldPropertyRow[];
   const decisions = (
-    alertSources ? alertSources.decisions : decisionRes.error ? [] : (decisionRes.data ?? [])
+    preSources ? preSources.decisions : decisionRes.error ? [] : (decisionRes.data ?? [])
   ) as HoldDecisionRow[];
   const reviews = (
-    alertSources ? alertSources.reviews : reviewRes.error ? [] : (reviewRes.data ?? [])
+    preSources ? preSources.reviews : reviewRes.error ? [] : (reviewRes.data ?? [])
   ) as HoldReviewRow[];
   const drafts = (
-    alertSources ? alertSources.drafts : draftRes.error ? [] : (draftRes.data ?? [])
+    preSources ? preSources.drafts : draftRes.error ? [] : (draftRes.data ?? [])
   ) as HoldDraftRow[];
 
   // Runs for the hold cards: by property and by source inbound message, so a
@@ -900,6 +907,8 @@ export async function loadMessagesV2Data(
       ),
     ]),
   ];
+  // A propertyless draft linked only by run_id still needs its run, to resolve (and DNC-verify) its property.
+  const draftRunIds = [...new Set(drafts.flatMap((d) => (d.run_id ? [d.run_id] : [])))];
   const contextErrors: string[] = [];
   // Latest run PER property via the RLS-respecting RPC, 200 ids per call.
   const byProperty: PipelineRun[] = [];
@@ -933,8 +942,19 @@ export async function loadMessagesV2Data(
         contextErrors.push("run lookup by message");
     } else byMessage.push(...((res.data ?? []) as PipelineRun[]));
   }
+  const byDraftRun: PipelineRun[] = [];
+  const draftRunResults = await Promise.all(
+    chunked(draftRunIds).map((ids) =>
+      supabase.from("pipeline_runs").select("*").eq("org_id", orgId).in("id", ids),
+    ),
+  );
+  for (const res of draftRunResults) {
+    if (res.error) {
+      if (!contextErrors.includes("run lookup by draft")) contextErrors.push("run lookup by draft");
+    } else byDraftRun.push(...((res.data ?? []) as PipelineRun[]));
+  }
   const pool = new Map<string, PipelineRun>();
-  for (const run of [...windowRuns, ...byProperty, ...byMessage]) {
+  for (const run of [...windowRuns, ...byProperty, ...byMessage, ...byDraftRun]) {
     pool.set(run.id, run);
   }
 
@@ -957,22 +977,17 @@ export async function loadMessagesV2Data(
   const stepChunks: string[][] = [];
   for (let i = 0; i < loadedRunIds.length; i += STEP_CHUNK)
     stepChunks.push(loadedRunIds.slice(i, i + STEP_CHUNK));
+  // Steps are paged to exhaustion: a chunk of runs can have more steps than one response holds, and a
+  // silently short result would change a hold's latest-activity order. Any failed page is a failed lookup.
   const stepResults = await Promise.all(
     stepChunks.map((ids) =>
-      supabase
-        .from("pipeline_run_steps")
-        .select("*")
-        .eq("org_id", orgId)
-        .in("run_id", ids)
-        .order("seq", { ascending: true }),
+      fetchAllKeyset<PipelineRunStep>(() =>
+        supabase.from("pipeline_run_steps").select("*").eq("org_id", orgId).in("run_id", ids),
+      ),
     ),
   );
   if (stepResults.some((res) => res.error)) contextErrors.push("step lookup");
-  const stepsByRun = groupStepsByRun(
-    stepResults.flatMap(
-      (res) => (res.error ? [] : (res.data ?? [])) as PipelineRunStep[],
-    ),
-  );
+  const stepsByRun = groupStepsByRun(stepResults.flatMap((res) => res.rows));
   const withSteps = (run: PipelineRun): RunWithSteps => ({
     ...run,
     steps: stepsByRun.get(run.id) ?? [],
@@ -994,6 +1009,89 @@ export async function loadMessagesV2Data(
   const isLimited = (res: { data?: unknown; error?: unknown }): boolean =>
     !res.error && Array.isArray(res.data) && res.data.length > HOLDS_COUNT_CAP;
 
+  const enriched = await enrichHoldCards(supabase, orgId, openHolds, {
+    includeLuna: opts.includeLuna,
+    decisions,
+    reviews,
+  });
+  contextErrors.push(...enriched.contextErrors.filter((e) => !contextErrors.includes(e)));
+  const deadLetterUnavailable = enriched.deadLetterUnavailable;
+  const holdsMeta = buildHoldsMeta({
+    shown: openHolds.length,
+    deadLetterUnavailable,
+    contextErrors,
+    sources: alertSources
+      ? [
+          {
+            source: "needs_attention",
+            ids: properties.map((r) => r.id),
+            failed: alertSources.failed,
+          },
+          { source: "jev_decision", ids: decisions.map((r) => r.property_id), failed: alertSources.failed },
+          { source: "disposition_review", ids: reviews.map((r) => r.property_id), failed: alertSources.failed },
+          {
+            source: "pending_draft",
+            ids: drafts.map((r) => r.property_id ?? `draft:${r.id}`),
+            failed: alertSources.failed,
+          },
+        ]
+      : [
+      {
+        source: "needs_attention",
+        ids: keysOf(flaggedIds, (r) => r.id),
+        failed: !!flaggedRes.error,
+        limited: isLimited(flaggedIds),
+      },
+      {
+        source: "jev_decision",
+        ids: keysOf(decisionIds, (r) => r.property_id),
+        failed: !!decisionRes.error,
+        limited: isLimited(decisionIds),
+      },
+      {
+        source: "disposition_review",
+        ids: keysOf(reviewIds, (r) => r.property_id),
+        failed: !!reviewRes.error,
+        limited: isLimited(reviewIds),
+      },
+      {
+        source: "pending_draft",
+        ids: keysOf(draftIds, (r) => r.property_id ?? `draft:${r.id}`),
+        failed: !!draftRes.error,
+        limited: isLimited(draftIds),
+      },
+    ],
+  });
+
+  const configRow = (configRes.error ? [] : (configRes.data ?? []))[0] ?? null;
+  return {
+    runs: await attachHotAlertTimes(supabase, orgId, windowRuns.map(withSteps)),
+    holds: enriched.holds.map((h) => ({ ...h, run: h.run ? withSteps(h.run) : null })),
+    holdsMeta,
+    feedError,
+    stepsUnavailable: contextErrors.includes("step lookup"),
+    badgesError,
+    badges: badgesError
+      ? []
+      : buildModeBadges(configRow, (thresholdRes.data ?? []) as ThresholdRow[]),
+    nowMs,
+  };
+}
+
+/**
+ * Card annotations for holds that are about to render: dead-letter markers, latest alert status and (page only)
+ * Luna's suggestion. None of these affect which holds exist or their order, so a failure here is reported as a
+ * context error (an amber note), never as a missing hold. Shared by the page loader and the waiting list.
+ */
+export async function enrichHoldCards<R extends PipelineRun>(
+  supabase: LooseSupabase,
+  orgId: string,
+  openHolds: OpenHold<R>[],
+  opts: { includeLuna?: boolean; decisions?: readonly HoldDecisionRow[]; reviews?: readonly HoldReviewRow[] } = {},
+): Promise<{ holds: OpenHold<R>[]; contextErrors: string[]; deadLetterUnavailable: boolean }> {
+  const contextErrors: string[] = [];
+  const decisions = opts.decisions ?? [];
+  const reviews = opts.reviews ?? [];
   // Dead letters: ids and reason only (never the saved reply text). A missing table is
   // treated as "none"; any other error is surfaced as unavailable.
   const runIds = new Set<string>();
@@ -1020,15 +1118,19 @@ export async function loadMessagesV2Data(
       (ids) => ["inbound_message_id", ids] as const,
     ),
   ];
-  const deadResults = await Promise.all(
-    deadQueries.map(([col, ids]) =>
-      supabase
-        .from("ai_reply_dead_letters")
-        .select("id, run_id, inbound_message_id, reason")
-        .eq("org_id", orgId)
-        .in(col, ids),
-    ),
-  );
+  const deadResults = (
+    await Promise.all(
+      deadQueries.map(([col, ids]) =>
+        fetchAllKeyset<{ run_id: string | null; inbound_message_id: string | null; reason?: string | null }>(() =>
+          supabase
+            .from("ai_reply_dead_letters")
+            .select("id, run_id, inbound_message_id, reason")
+            .eq("org_id", orgId)
+            .in(col, ids),
+        ),
+      ),
+    )
+  ).map((res) => ({ data: res.rows, error: res.error }));
   for (const res of deadResults) {
     if (res.error) {
       const e = res.error as { code?: string; message?: string };
@@ -1185,7 +1287,7 @@ export async function loadMessagesV2Data(
       }
     }
   }
-  const deadLettersFor = (h: OpenHold<PipelineRun>): DeadLetterInfo[] =>
+  const deadLettersFor = (h: OpenHold<R>): DeadLetterInfo[] =>
     groups
       .filter(
         (g) =>
@@ -1196,56 +1298,7 @@ export async function loadMessagesV2Data(
       )
       .map((g) => ({ ...g }));
 
-  const holdsMeta = buildHoldsMeta({
-    shown: openHolds.length,
-    deadLetterUnavailable,
-    contextErrors,
-    sources: alertSources
-      ? [
-          {
-            source: "needs_attention",
-            ids: properties.map((r) => r.id),
-            failed: alertSources.failed,
-          },
-          { source: "jev_decision", ids: decisions.map((r) => r.property_id), failed: alertSources.failed },
-          { source: "disposition_review", ids: reviews.map((r) => r.property_id), failed: alertSources.failed },
-          {
-            source: "pending_draft",
-            ids: drafts.map((r) => r.property_id ?? `draft:${r.id}`),
-            failed: alertSources.failed,
-          },
-        ]
-      : [
-      {
-        source: "needs_attention",
-        ids: keysOf(flaggedIds, (r) => r.id),
-        failed: !!flaggedRes.error,
-        limited: isLimited(flaggedIds),
-      },
-      {
-        source: "jev_decision",
-        ids: keysOf(decisionIds, (r) => r.property_id),
-        failed: !!decisionRes.error,
-        limited: isLimited(decisionIds),
-      },
-      {
-        source: "disposition_review",
-        ids: keysOf(reviewIds, (r) => r.property_id),
-        failed: !!reviewRes.error,
-        limited: isLimited(reviewIds),
-      },
-      {
-        source: "pending_draft",
-        ids: keysOf(draftIds, (r) => r.property_id ?? `draft:${r.id}`),
-        failed: !!draftRes.error,
-        limited: isLimited(draftIds),
-      },
-    ],
-  });
-
-  const configRow = (configRes.error ? [] : (configRes.data ?? []))[0] ?? null;
   return {
-    runs: windowRuns.map(withSteps),
     holds: openHolds.map((h) => {
       const dls = deadLettersFor(h);
       return {
@@ -1257,17 +1310,10 @@ export async function loadMessagesV2Data(
         ...(h.property_id && alertByProperty.has(h.property_id)
           ? { alert: alertByProperty.get(h.property_id) }
           : {}),
-        run: h.run ? withSteps(h.run) : null,
       };
     }),
-    holdsMeta,
-    feedError,
-    stepsUnavailable: contextErrors.includes("step lookup"),
-    badgesError,
-    badges: badgesError
-      ? []
-      : buildModeBadges(configRow, (thresholdRes.data ?? []) as ThresholdRow[]),
-    nowMs,
+    contextErrors,
+    deadLetterUnavailable,
   };
 }
 
@@ -1383,21 +1429,24 @@ export async function loadBacklogHolds(
   offset: number,
   limit: number,
   nowMs: number = Date.now(),
-  opts: Pick<LoadOptions, "includeLuna"> = {},
+  opts: Pick<LoadOptions, "includeLuna"> & { bucket?: HoldBucket } = {},
 ): Promise<{
   holds: OpenHold<RunWithSteps>[];
+  /** Total for the requested bucket (Backlog by default). */
   backlogTotal: number;
   hasMore: boolean;
   /** offset + property ids consumed; the next page starts here even if some ids rendered no card. */
   nextOffset: number;
   failed: boolean;
 } | null> {
-  const buckets = await loadHoldBuckets(supabase, orgId, "backlog", limit, offset);
+  const bucket = opts.bucket ?? "backlog";
+  const buckets = await loadHoldBuckets(supabase, orgId, bucket, limit, offset);
   if (!buckets) return null;
+  const bucketTotal = bucket === "new" ? buckets.newTotal : buckets.backlogTotal;
   if (buckets.propertyIds.length === 0) {
     return {
       holds: [],
-      backlogTotal: buckets.backlogTotal,
+      backlogTotal: bucketTotal,
       hasMore: false,
       nextOffset: offset,
       failed: false,
@@ -1411,8 +1460,8 @@ export async function loadBacklogHolds(
   });
   return {
     holds: data.holds,
-    backlogTotal: buckets.backlogTotal,
-    hasMore: offset + buckets.propertyIds.length < buckets.backlogTotal,
+    backlogTotal: bucketTotal,
+    hasMore: offset + buckets.propertyIds.length < bucketTotal,
     nextOffset: offset + buckets.propertyIds.length,
     failed: data.holdsMeta.failed.length > 0,
   };

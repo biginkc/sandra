@@ -29,3 +29,10 @@ it("asks before archiving", async () => {
   await user.click(screen.getByRole("button", { name: "Archive drip" }));
   await waitFor(() => expect(actions.archiveSequence).toHaveBeenCalledWith("s2"));
 });
+
+it("routing v2 (automatic) drips get no edit / archive / restore / open-close controls", () => {
+  render(<SequenceRowActions sequenceId="seq-v2" isArchived={false} isActive={false} managed />);
+  expect(screen.getByText("Automatic drip")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Actions" })).not.toBeInTheDocument();
+});

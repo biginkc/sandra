@@ -20,6 +20,7 @@ it("previews the cumulative delay through the first SMS and omits it for status-
     { sequence_id: "mixed", step_index: 0, delay_after_previous_minutes: 60, action_type: "change_status" },
     { sequence_id: "mixed", step_index: 1, delay_after_previous_minutes: 10020, action_type: "send_sms" },
     { sequence_id: "status-only", step_index: 0, delay_after_previous_minutes: 60, action_type: "change_status" },
+    { sequence_id: "mixed", step_index: 2, delay_after_previous_minutes: 0, action_type: "send_voicemail_drop" },
   ];
   createClient.mockResolvedValue({
     auth: { getUser: async () => ({ data: { user: { id: "user-1" } } }) },
@@ -29,8 +30,8 @@ it("previews the cumulative delay through the first SMS and omits it for status-
   });
 
   expect(await listDripChoices()).toEqual({ ok: true, data: [
-    { id: "mixed", name: "Mixed", textCount: 1, days: 7, firstSend: previewFirstSend(10080, "America/Chicago") },
-    { id: "status-only", name: "Status only", textCount: 0, days: 1, firstSend: null },
+    { id: "mixed", name: "Mixed", textCount: 1, voicemailCount: 1, days: 7, firstSend: previewFirstSend(10080, "America/Chicago") },
+    { id: "status-only", name: "Status only", textCount: 0, voicemailCount: 0, days: 1, firstSend: null },
   ] });
 });
 

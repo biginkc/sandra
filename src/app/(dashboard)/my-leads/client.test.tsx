@@ -261,7 +261,7 @@ describe("MyLeadsClient", () => {
     mocks.loadMyLeads.mockResolvedValueOnce({ ok: true, snapshot: { ...initial, snapshotAt: "2026-09-11T14:01:00.000Z" }, kpis })
     const view = renderClient(initial)
     try {
-      expect(screen.getByText(/Counts update every 30 seconds/)).toBeInTheDocument()
+      expect(screen.getByText(/Activity updates every 30 seconds/)).toBeInTheDocument()
       await act(async () => { await vi.advanceTimersByTimeAsync(29_999) })
       expect(mocks.loadMyLeads).not.toHaveBeenCalled()
       await act(async () => { await vi.advanceTimersByTimeAsync(1) })
@@ -707,3 +707,9 @@ it("keeps elapsed call time advancing when opening a workflow dialog", async () 
     view.unmount()
   } finally { vi.useRealTimers() }
 })
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
+});

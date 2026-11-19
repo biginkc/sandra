@@ -23,6 +23,18 @@ const baseProps = {
 }
 
 describe("My Leads workflow dialogs", () => {
+  it("lets DialPad resolve the selected automatic call without creating an unlinked payload", async () => {
+    const onSubmit = vi.fn(async () => ({ ok: true as const }))
+    const user = userEvent.setup()
+    render(<AcquisitionAttemptDialog {...baseProps} initialCallActivityId="call-1" callReferenceOptions={[{ id: "call-1", label: "9 AM", provider: "dialpad" }]} onSubmit={onSubmit} />)
+    await user.selectOptions(screen.getByLabelText("Source"), "dialpad")
+    expect(screen.getByLabelText("Call to resolve")).toHaveValue("call-1")
+    await user.selectOptions(screen.getByLabelText("External outcome"), "reached")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T09:00" } })
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source: "dialpad", callActivityId: "call-1" }))
+  })
+
   it('saves an attempt before offering and starting an optional drip', async () => {
     dripActions.listDripChoices.mockResolvedValue({ok:true,data:[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]})
     dripActions.startDripForLeads.mockResolvedValue({ok:true,data:{results:[{propertyId:'property-1',status:'enrolled',reason:'Enrolled'}]}})
@@ -472,3 +484,9 @@ it("offers explicit replacement after saving the attempt", async () => {
   expect(onOpenChange).toHaveBeenCalledWith(false)
   vi.mocked(listDripProgress).mockResolvedValue([])
 })
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
+});

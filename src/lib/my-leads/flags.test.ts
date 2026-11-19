@@ -17,8 +17,8 @@ function clientReturning(result: { data: unknown; error: unknown }) {
 describe("getMyLeadsFlag", () => {
   beforeEach(() => createAdminClient.mockReset());
 
-  it("lists all thirteen flags", () => {
-    expect(MY_LEADS_FLAGS).toHaveLength(13);
+  it("lists all fourteen flags", () => {
+    expect(MY_LEADS_FLAGS).toHaveLength(14);
   });
 
   it("returns true only when the column is true", async () => {

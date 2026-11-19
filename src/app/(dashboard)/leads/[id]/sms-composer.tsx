@@ -20,7 +20,8 @@ import { Label } from "@/components/ui/label";
 import { callAction } from "@/lib/errors/call-action";
 import type { DialpadFromOption } from "@/lib/messaging/types";
 
-import { listFromNumbers, sendSmsFromLead } from "../actions";
+import { listFromNumbers } from "../actions";
+import { sendSmsFromLeadStamped } from "../send-sms-stamped";
 
 type TemplatePick = {
   id: string;
@@ -124,7 +125,7 @@ export function SmsComposer({
     startTransition(async () => {
       try {
         const result = await callAction(
-          sendSmsFromLead(propertyId, body, fromNumber || null, queueOnly, homeownerPhone),
+          sendSmsFromLeadStamped(propertyId, body, fromNumber || null, queueOnly, homeownerPhone),
           { fallbackMessage: queueOnly ? "Queue failed" : "SMS send failed" },
         );
         if (!result.ok) return;

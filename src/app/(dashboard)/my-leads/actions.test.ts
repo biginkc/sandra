@@ -29,6 +29,16 @@ describe('My Leads command integration',()=>{
     await submitMyLeadCommand('log-attempt',{propertyId:'lead',source:'sandra',callActivityId:'activity'});
     expect(mocks.rpc).toHaveBeenCalledWith('fn_finalize_acquisition_attempt',{p_input:{orgId:'actual-org',propertyId:'lead',source:'sandra',callActivityId:'activity'}});
   });
+  it('finalizes a linked DialPad call and logs an unlinked one', async()=>{
+    await submitMyLeadCommand('log-attempt',{propertyId:'lead',source:'dialpad',callActivityId:'activity'});
+    expect(mocks.rpc).toHaveBeenLastCalledWith('fn_finalize_acquisition_attempt',{p_input:{orgId:'actual-org',propertyId:'lead',source:'dialpad',callActivityId:'activity'}});
+    await submitMyLeadCommand('log-attempt',{propertyId:'lead',source:'dialpad',callActivityId:null});
+    expect(mocks.rpc).toHaveBeenLastCalledWith('fn_log_acquisition_attempt',{p_input:{orgId:'actual-org',propertyId:'lead',source:'dialpad',callActivityId:null}});
+  });
+  it('requires an explicit call selection for ambiguous recording evidence',async()=>{
+    mocks.rpc.mockResolvedValue({data:null,error:{message:'AMBIGUOUS_CALL_REFERENCE',code:'MLS01'}});
+    expect(await submitMyLeadCommand('log-attempt',{source:'dialpad'})).toMatchObject({ok:false,certainty:'rejected',message:expect.stringContaining('Select the call by date and time')});
+  });
   it('rejects an unscoped caller before any write',async()=>{
     mocks.viewer.mockRejectedValue(new Error('No membership'));
     expect((await submitMyLeadCommand('archive',{propertyId:'lead'})).ok).toBe(false);expect(mocks.rpc).not.toHaveBeenCalled();

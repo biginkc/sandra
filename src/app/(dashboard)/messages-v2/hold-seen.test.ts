@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { fakePostgrest } from "./fake-postgrest.test-util";
 import { loadFreshSeen, mergeSeen, withFreshSeen } from "./hold-seen";
 import type { LooseSupabase } from "./queries";
 
@@ -14,14 +15,15 @@ function fake(rows: (table: string, calls: Call[]) => { data?: unknown; error?: 
       const entry = { table, calls: [] as Call[] };
       log.push(entry);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "in", "order", "limit"]) {
+      for (const m of ["select", "eq", "in", "order", "limit", "gt"]) {
         q[m] = (...args: unknown[]) => {
           entry.calls.push({ method: m, args });
           return q;
         };
       }
       q.then = (resolve: (v: unknown) => unknown) =>
-        resolve({ data: [], error: null, ...rows(table, entry.calls) });
+        // Keyset follow-up page (gt on id): the fake's rows were all on the first page.
+        resolve(entry.calls.some((c) => c.method === "gt") ? { data: [], error: null } : { data: [], error: null, ...rows(table, entry.calls) });
       return q;
     },
   };
@@ -33,9 +35,9 @@ describe("loadFreshSeen", () => {
     const { client, log } = fake((table) => {
       if (table === "properties")
         return { data: [{ id: "p1", needs_human_attention: true, last_ai_escalation_reason: "draft_held", last_ai_escalation_at: "2026-10-07T11:00:00+00:00" }] };
-      if (table === "jev_lead_decisions") return { data: [{ property_id: "p1", created_at: "2026-10-07T12:00:00.000001+00:00" }] };
-      if (table === "ai_disposition_reviews") return { data: [{ property_id: "p1", created_at: "2026-10-07T13:00:00+00:00" }] };
-      return { data: [{ property_id: "p1", created_at: "2026-10-07T12:30:00+00:00" }] };
+      if (table === "jev_lead_decisions") return { data: [{ id: "a", property_id: "p1", created_at: "2026-10-07T12:00:00.000001+00:00" }] };
+      if (table === "ai_disposition_reviews") return { data: [{ id: "b", property_id: "p1", created_at: "2026-10-07T13:00:00+00:00" }] };
+      return { data: [{ id: "c", property_id: "p1", created_at: "2026-10-07T12:30:00+00:00" }] };
     });
     const seen = await loadFreshSeen(client, "org", ["p1"]);
     expect(seen?.get("p1")).toEqual({
@@ -43,11 +45,11 @@ describe("loadFreshSeen", () => {
       flagReason: "draft_held",
       flagAt: "2026-10-07T11:00:00+00:00",
     });
-    // Newest first, pending only, org scoped, property filtered, never oldest-first.
+    // Pending only, org scoped, keyset-paged on id (read to exhaustion).
     for (const e of log.filter((l) => l.table !== "properties")) {
       expect(e.calls).toContainEqual({ method: "eq", args: ["status", "pending"] });
       expect(e.calls).toContainEqual({ method: "eq", args: ["org_id", "org"] });
-      expect(e.calls.find((c) => c.method === "order")!.args[1]).toMatchObject({ ascending: false });
+      expect(e.calls.find((c) => c.method === "order")!.args).toEqual(["id", { ascending: true }]);
     }
   });
 
@@ -62,6 +64,30 @@ describe("loadFreshSeen", () => {
 
   it("returns null when any query fails, so the caller keeps its own value", async () => {
     const { client } = fake((table) => (table === "ai_reply_drafts" ? { error: { message: "boom" } } : {}));
+    expect(await loadFreshSeen(client, "org", ["p1"])).toBeNull();
+  });
+
+  it("a server cap below the page size never hides a newer pending row (all rows read)", async () => {
+    const pending = Array.from({ length: 30 }, (_, i) => ({
+      id: `r${String(i).padStart(3, "0")}`,
+      org_id: "org",
+      status: "pending",
+      property_id: "p1",
+      created_at: `2026-10-07T12:${String(i).padStart(2, "0")}:00.000000Z`,
+    }));
+    const { client } = fakePostgrest(
+      { properties: [{ id: "p1", org_id: "org", needs_human_attention: false }], jev_lead_decisions: pending, ai_disposition_reviews: [], ai_reply_drafts: [] },
+      { cap: 7 },
+    );
+    expect((await loadFreshSeen(client, "org", ["p1"]))?.get("p1")?.through).toBe("2026-10-07T12:29:00.000000Z");
+  });
+
+  it("an error on a later page fails closed (null), never a partial through", async () => {
+    const pending = Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, org_id: "org", status: "pending", property_id: "p1", created_at: `2026-10-07T12:0${i}:00Z` }));
+    const { client } = fakePostgrest(
+      { properties: [{ id: "p1", org_id: "org" }], jev_lead_decisions: pending, ai_disposition_reviews: [], ai_reply_drafts: [] },
+      { cap: 3, fail: (table, n) => table === "jev_lead_decisions" && n === 2 },
+    );
     expect(await loadFreshSeen(client, "org", ["p1"])).toBeNull();
   });
 
@@ -86,7 +112,7 @@ describe("withFreshSeen / mergeSeen", () => {
 
   it("replaces seen on holds with a property and leaves the rest and failures alone", async () => {
     const { client } = fake((table) =>
-      table === "jev_lead_decisions" ? { data: [{ property_id: "p1", created_at: "2026-10-07T12:00:00+00:00" }] } : {},
+      table === "jev_lead_decisions" ? { data: [{ id: "a", property_id: "p1", created_at: "2026-10-07T12:00:00+00:00" }] } : {},
     );
     const holds = [
       { property_id: "p1", seen: { through: "2026-10-07T01:00:00+00:00", flagReason: null, flagAt: null } },

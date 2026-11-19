@@ -37,6 +37,16 @@ describe("PostCallPrompt", () => {
     dripActions.startDripForLeads.mockResolvedValue({ ok: true, data: { results: [{ propertyId: "property-1", status: "enrolled", reason: "Enrolled" }] } })
   })
 
+  it("preserves the selected automatic call when switched to DialPad", async () => {
+    const { user, onSubmit } = setup({ ...linked, callReferenceOptions: refs({ provider: "dialpad" }) })
+    await user.selectOptions(screen.getByLabelText("Where was this call?"), "dialpad")
+    expect(screen.getByLabelText("Call to resolve")).toHaveValue("call-1")
+    await user.click(outcome("Reached"))
+    fireEvent.change(screen.getByLabelText("When did it occur?"), { target: { value: "2026-09-12T09:00" } })
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source: "dialpad", callActivityId: "call-1" }))
+  })
+
   it("renders the stable test ids and the four outcomes", () => {
     setup()
     expect(screen.getByTestId("post-call-prompt")).toBeVisible()
@@ -120,7 +130,7 @@ describe("PostCallPrompt", () => {
     expect(screen.queryByLabelText(/Recording link/)).not.toBeInTheDocument()
     expect(screen.queryByLabelText("When did it occur?")).not.toBeInTheDocument()
     await user.selectOptions(screen.getByLabelText("Where was this call?"), "dialpad")
-    expect(screen.getByLabelText("Recording link (required)")).toBeVisible()
+    expect(screen.getByLabelText("Recording link (optional)")).toBeVisible()
     expect(screen.getByLabelText("When did it occur?")).toBeVisible()
     await user.selectOptions(screen.getByLabelText("Where was this call?"), "manual")
     expect(screen.queryByLabelText(/Recording link/)).not.toBeInTheDocument()
@@ -333,3 +343,9 @@ it("offers explicit replacement after saving the attempt", async () => {
   expect(onOpenChange).toHaveBeenCalledWith(false)
   vi.mocked(listDripProgress).mockResolvedValue([])
 })
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
+});

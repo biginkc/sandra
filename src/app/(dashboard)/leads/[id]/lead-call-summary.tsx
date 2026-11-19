@@ -24,6 +24,8 @@ export type CallActivityRollupRow = {
   outcome: string | null;
   disposition: string | null;
   recording_status: "none" | "pending" | "available" | "failed";
+  /** Provider evidence only; this does not establish playable Sandra audio. */
+  provider_recording_url?: string | null;
   transcript_status: "none" | "pending" | "available" | "failed";
   summary_status: "none" | "pending" | "available" | "failed";
   jitter_attempt_id: string;
@@ -41,6 +43,7 @@ type RealtimeCallActivityRow = Pick<
   | "outcome"
   | "disposition"
   | "recording_status"
+  | "provider_recording_url"
   | "transcript_status"
   | "summary_status"
   | "jitter_attempt_id"
@@ -54,7 +57,7 @@ export type LeadCallSummaryProps = {
 };
 
 const CALL_ACTIVITY_WITH_ARTIFACTS =
-  "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
+  "id, created_at, started_at, outcome, disposition, recording_status, provider_recording_url, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
 
 const CHILD_STATUS_FIELDS = [
   "recording_status",
@@ -213,6 +216,13 @@ function RecordingState({
       <p className="text-destructive break-words text-xs" role="status">
         Recording failed
         {recording?.error_message ? `: ${recording.error_message}` : ""}
+      </p>
+    );
+  }
+  if (row.provider_recording_url?.trim()) {
+    return (
+      <p className="text-muted-foreground text-xs">
+        Provider recording reference received. Playback is not available in Sandra.
       </p>
     );
   }

@@ -11,11 +11,23 @@ const hero = readFileSync(
 );
 const base = button.match(/"(group\/button[^"\n]+)"/)[1];
 const outline = button.match(/outline:\s*"([^"]+)"/)[1];
-const rows = [
-  ...hero.matchAll(/className=\{`([^`]+)\$\{actionFocusClasses\}`\}/g),
-].map((m) => m[1]);
+const actionLayoutBase = hero.match(
+  /className=\{`([^`]+)\$\{imageClasses\}/,
+)?.[1]?.trim();
+const flatActionClasses = hero.match(
+  /variant="flat"\s+className="([^"]+)"/,
+)?.[1];
+const imageActionClasses = hero.match(
+  /variant === "image"\s*\n\s*\? "([^"]+)"/,
+)?.[1];
 const focus = hero.match(/const actionFocusClasses =\s*"([^"]+)"/)[1];
-assert.equal(rows.length, 2, "Expected flat and media hero action layouts");
+assert.ok(actionLayoutBase, "Expected shared hero action layout classes");
+assert.ok(flatActionClasses, "Expected flat hero action classes");
+assert.ok(imageActionClasses, "Expected media hero action classes");
+const rows = [
+  `${actionLayoutBase} ${flatActionClasses}`,
+  `${actionLayoutBase} ${imageActionClasses}`,
+];
 const cssInput = readFileSync("src/app/globals.css", "utf8");
 const classes = [
   base,

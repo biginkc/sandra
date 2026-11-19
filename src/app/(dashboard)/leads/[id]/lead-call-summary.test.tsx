@@ -106,6 +106,7 @@ function row(
     outcome: overrides.outcome ?? "connected_human",
     disposition: overrides.disposition ?? null,
     recording_status: overrides.recording_status ?? "none",
+    provider_recording_url: overrides.provider_recording_url ?? null,
     transcript_status: overrides.transcript_status ?? "none",
     summary_status: overrides.summary_status ?? "none",
     jitter_attempt_id: overrides.jitter_attempt_id ?? `attempt-${overrides.id}`,
@@ -261,6 +262,60 @@ describe("<LeadCallSummary />", () => {
       "whitespace-normal",
       "break-words",
     );
+  });
+
+  it("keeps DialPad recording evidence independent of Jitter navigation", () => {
+    render(
+      <CallEventCard
+        row={row({
+          id: "dialpad-with-reference",
+          provider: "dialpad",
+          provider_recording_url: "https://dialpad.com/recording.mp3",
+        })}
+        jitterHref="https://jitter.example.test/history"
+      />,
+    );
+    expect(screen.getByText("Provider recording reference received. Playback is not available in Sandra.")).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Open call in Jitter" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Load recording/ })).not.toBeInTheDocument();
+  });
+
+  it("reports provider evidence without claiming playable audio or exposing its URL", () => {
+    renderWidget({ initialRows: [row({ id: "provider", provider_recording_url: "https://dialpad.com/blob/adminrecording/private.mp3" })] });
+    expect(screen.getByText("Provider recording reference received. Playback is not available in Sandra.")).toBeVisible();
+    expect(screen.queryByText("No recording captured")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Load recording/ })).not.toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain("private.mp3");
+  });
+
+  it.each([null, "", "   "])("keeps no-recording state without provider evidence (%s)", (url) => {
+    renderWidget({ initialRows: [row({ id: "none", provider_recording_url: url })] });
+    expect(screen.getByText("No recording captured")).toBeVisible();
+  });
+
+  it("shows newly received provider evidence on realtime update without a status change", async () => {
+    renderWidget();
+    await waitFor(() => expect(callbacks.UPDATE).toBeDefined());
+    await act(async () => callbacks.UPDATE({ new: row({ id: "call-1", provider_recording_url: "https://dialpad.com/recording.mp3" }) }));
+    expect(screen.getByText("Provider recording reference received. Playback is not available in Sandra.")).toBeVisible();
+    expect(screen.queryByText("No recording captured")).not.toBeInTheDocument();
+  });
+
+  it("loads provider evidence when a realtime insert refetches the call", async () => {
+    renderWidget({ initialRows: [] });
+    const inserted = row({ id: "new-provider", provider_recording_url: "https://dialpad.com/recording.mp3" });
+    maybeSingle.mockResolvedValue({ data: inserted, error: null });
+    await waitFor(() => expect(callbacks.INSERT).toBeDefined());
+    await act(async () => callbacks.INSERT({ new: inserted }));
+    expect(select).toHaveBeenCalledWith(expect.stringContaining("provider_recording_url"));
+    expect(screen.getByText("Provider recording reference received. Playback is not available in Sandra.")).toBeVisible();
+  });
+
+  it.each(["available", "pending", "failed"] as const)("preserves the %s state when provider evidence exists", (status) => {
+    renderWidget({ initialRows: [row({ id: "provider", recording_status: status, provider_recording_url: "https://dialpad.com/recording.mp3", call_recordings: [recording({ status })] })] });
+    expect(screen.queryByText("Provider recording reference received. Playback is not available in Sandra.")).not.toBeInTheDocument();
+    if (status === "available") expect(screen.getByRole("button", { name: "Load recording (42s)" })).toBeVisible();
+    else expect(screen.getByText(status === "pending" ? "Recording pending" : "Recording failed")).toBeVisible();
   });
 
   it("renders explicit pending and child-backed failure states", () => {

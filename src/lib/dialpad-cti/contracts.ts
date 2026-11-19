@@ -86,6 +86,8 @@ export function classifyDialpadRpcError(error: { code?: string | null; details?:
     case '22023':
       return { kind: 'invalid_input', detail };
     case '40001':
+    // 20261021130000: IDEMPOTENCY_CONFLICT raises DPC01 (non-retryable; PostgREST retries 40001 forever).
+    case 'DPC01':
       return { kind: 'idempotency_conflict' };
     default:
       return { kind: 'unknown' };

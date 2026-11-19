@@ -14,9 +14,9 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 import { applyMyLeadsChain } from "@tests/integration/my-leads-housekeeping-fixture";
 
 const dir = `${path.join(process.cwd(), "supabase/migrations")}/`;
-export const url = requireLoopbackPostgresUrl(
-  process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
-);
+// Resolved lazily: importing this module (e.g. for `svc` in the recovery lane,
+// which uses NORMA_ROLLBACK_* URLs) must not require TEST_SUPABASE_DB_URL.
+export const dbUrl = (): string => requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "");
 export const load = (file: string, base = dir) =>
   readFileSync(`${base}${file}`, "utf8").replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
 
@@ -36,7 +36,7 @@ let phoneCounter = 0;
 const nextPhone = () => `+1816557${String(1000 + (phoneCounter++ % 9000)).padStart(4, "0")}`;
 
 export async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, sql = migrations()) {
-  const db = new Client({ connectionString: url });
+  const db = new Client({ connectionString: dbUrl() });
   await db.connect();
   try {
     await db.query("begin");

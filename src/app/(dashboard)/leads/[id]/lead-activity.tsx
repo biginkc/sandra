@@ -6,12 +6,18 @@ import {
   NotebookPenIcon,
   PhoneCallIcon,
   RotateCcwIcon,
+  VoicemailIcon,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
 import { messageDripLabels } from "@/lib/sequences/message-drip-labels";
+import {
+  voicemailDropTimelineText,
+  type VoicemailDropTimelineRow,
+} from "@/lib/sequences/voicemail-drop-step-config";
+import { hasProofOfDelivery } from "@/lib/voicemail-drop/proof-link";
 
 import {
   CallEventCard,
@@ -62,6 +68,12 @@ export type LeadActivityEvent =
       id: string;
       timestamp: string;
       row: LeadEvent;
+    }
+  | {
+      source: "voicemail";
+      id: string;
+      timestamp: string;
+      row: VoicemailDropTimelineRow;
     };
 
 type SourceName = LeadActivityEvent["source"];
@@ -74,6 +86,8 @@ type Props = {
   initialCalls: CallActivityRollupRow[];
   initialEvents: LeadEvent[];
   initialAcquisitionHistory?: AcquisitionHistoryResult;
+  /** Read-only voicemail drop rows for this lead, newest first. */
+  initialVoicemailDrops?: VoicemailDropTimelineRow[];
   messageError: string | null;
   noteError: string | null;
   callError: string | null;
@@ -87,7 +101,7 @@ type Props = {
 };
 
 const CALL_ACTIVITY_WITH_ARTIFACTS =
-  "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
+  "id, created_at, started_at, outcome, disposition, recording_status, provider_recording_url, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, provider, call_recordings(*), call_transcripts(*)";
 
 export function LeadActivityTimeline(props: Props) {
   const {
@@ -203,6 +217,7 @@ export function LeadActivityTimeline(props: Props) {
     propertyId,
     props.initialAcquisitionHistory,
   );
+  const voicemailDrops = props.initialVoicemailDrops ?? EMPTY_VOICEMAIL_DROPS;
   const activity = useMemo(
     () =>
       buildLeadActivitySnapshot(
@@ -213,8 +228,10 @@ export function LeadActivityTimeline(props: Props) {
         { ...errors, acquisition: acquisition.error },
         acquisition.page.rows,
         acquisition.page.hasMore,
+        voicemailDrops,
       ),
     [
+      voicemailDrops,
       calls,
       errors,
       leadEvents,
@@ -237,6 +254,7 @@ export function LeadActivityTimeline(props: Props) {
       acquisition.retry();
       return;
     }
+    if (source === "voicemail") return;
     setRetrying(source);
     const supabase = createClient();
     try {
@@ -338,16 +356,6 @@ export function LeadActivityTimeline(props: Props) {
         </div>
       ) : null}
 
-      {acquisition.page.hasMore && (
-        <Button
-          variant="outline"
-          disabled={acquisition.pending}
-          onClick={acquisition.loadMore}
-          className="mb-3"
-        >
-          Load older outreach and offers
-        </Button>
-      )}
       {events.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed px-4 py-10 text-center text-sm">
           No messages, notes, calls, or activity yet.
@@ -389,9 +397,11 @@ export function LeadActivityTimeline(props: Props) {
               const previous = events[index - 1];
               const next = events[index + 1];
               const isContinuation =
+                index !== activity.trustBoundaryIndex &&
                 previous?.source === "message" &&
                 previous.row.direction === event.row.direction;
               const isLastInGroup =
+                index + 1 === activity.trustBoundaryIndex ||
                 next?.source !== "message" ||
                 next.row.direction !== event.row.direction;
               return (
@@ -427,6 +437,17 @@ export function LeadActivityTimeline(props: Props) {
                       isMine={event.row.author_user_id === currentUserId}
                       presentation="timeline"
                     />
+                  </div>
+                </Fragment>
+              );
+            }
+            if (event.source === "voicemail") {
+              return (
+                <Fragment key={`voicemail:${event.id}`}>
+                  {boundary}
+                  <div className={`relative pb-4 pl-12${muted}`}>
+                    <TimelineDot source="voicemail" />
+                    <VoicemailDropCard row={event.row} />
                   </div>
                 </Fragment>
               );
@@ -474,7 +495,20 @@ export function LeadActivityTimeline(props: Props) {
               </Fragment>
             );
           })}
+          {activity.trustFloor && activity.trustBoundaryIndex === -1 ? (
+            <ActivityTrustFloor timestamp={activity.trustFloor} />
+          ) : null}
         </div>
+      )}
+      {acquisition.page.hasMore && (
+        <Button
+          variant="outline"
+          disabled={acquisition.pending}
+          onClick={acquisition.loadMore}
+          className="mt-3"
+        >
+          Load older outreach and offers
+        </Button>
       )}
     </div>
   );
@@ -486,8 +520,17 @@ export function normalizeLeadActivityEvents(
   calls: CallActivityRollupRow[],
   leadEvents: LeadEvent[],
   acquisition: AcquisitionHistoryFact[] = [],
+  voicemailDrops: VoicemailDropTimelineRow[] = [],
 ): LeadActivityEvent[] {
   const deduplicated = new Map<string, LeadActivityEvent>();
+  for (const drop of voicemailDrops) {
+    deduplicated.set(`voicemail:${drop.id}`, {
+      source: "voicemail",
+      id: drop.id,
+      timestamp: drop.completed_at ?? drop.queued_at ?? drop.created_at,
+      row: drop,
+    });
+  }
   for (const message of messages) {
     deduplicated.set(`message:${message.id}`, {
       source: "message",
@@ -564,10 +607,11 @@ export function normalizeLeadActivityEvents(
     note: 1,
     call: 2,
     event: 3,
+    voicemail: 5,
   };
   return [...deduplicated.values()].sort(
     (a, b) =>
-      compareActivityTimestamps(a.timestamp, b.timestamp) ||
+      compareActivityTimestamps(b.timestamp, a.timestamp) ||
       sourceOrder[a.source] - sourceOrder[b.source] ||
       a.id.localeCompare(b.id),
   );
@@ -595,6 +639,7 @@ export function buildLeadActivitySnapshot(
   errors: Partial<Record<SourceName, string | null>>,
   acquisition: AcquisitionHistoryFact[] = [],
   acquisitionHasMore = false,
+  voicemailDrops: VoicemailDropTimelineRow[] = [],
 ) {
   const sourceOrder: SourceName[] = [
     "message",
@@ -635,6 +680,7 @@ export function buildLeadActivitySnapshot(
     calls,
     leadEvents,
     acquisition,
+    voicemailDrops,
   );
   return {
     events,
@@ -644,7 +690,7 @@ export function buildLeadActivitySnapshot(
         ? -1
         : events.findIndex(
             (event) =>
-              compareActivityTimestamps(event.timestamp, trustFloor) >= 0,
+              compareActivityTimestamps(event.timestamp, trustFloor) < 0,
           ),
     failures: sourceOrder.flatMap((source) => {
       const detail = errors[source];
@@ -659,6 +705,8 @@ function TimelineDot({ source }: { source: SourceName }) {
       <MessageSquareIcon className="size-3.5" />
     ) : source === "note" ? (
       <NotebookPenIcon className="size-3.5" />
+    ) : source === "voicemail" ? (
+      <VoicemailIcon className="size-3.5" />
     ) : (
       <PhoneCallIcon className="size-3.5" />
     );
@@ -706,7 +754,9 @@ function ActivitySourceFailure({
           ? "Calls"
           : source === "acquisition"
             ? "Outreach and offers"
-            : "Activity";
+            : source === "voicemail"
+              ? "Voicemails"
+              : "Activity";
   return (
     <div
       className="border-destructive/40 bg-destructive/5 flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between"
@@ -731,6 +781,43 @@ function ActivitySourceFailure({
         <RotateCcwIcon className="size-3.5" />
         {pending ? "Retrying…" : `Retry ${label.toLowerCase()}`}
       </Button>
+    </div>
+  );
+}
+
+const EMPTY_VOICEMAIL_DROPS: VoicemailDropTimelineRow[] = [];
+
+function VoicemailDropCard({ row }: { row: VoicemailDropTimelineRow }) {
+  const { title, detail } = voicemailDropTimelineText(row);
+  const at = row.completed_at ?? row.queued_at ?? row.created_at;
+  return (
+    <div
+      className="bg-card rounded-lg border px-3 py-2 text-sm"
+      data-testid="lead-voicemail-drop"
+      data-status={row.status}
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className={`font-semibold${row.status === "failed" ? " text-destructive" : ""}`}>{title}</p>
+        <time className="text-muted-foreground text-xs" dateTime={at}>
+          {new Date(at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+        </time>
+      </div>
+      {detail ? <p className="text-muted-foreground text-xs">{detail}</p> : null}
+      {hasProofOfDelivery({
+        proof_url: row.proof_url,
+        proof_url_at: row.proof_url_at ?? null,
+        completed_at: row.completed_at,
+        proof_storage_path: row.proof_storage_path ?? null,
+      }) ? (
+        <a
+          href={`/api/voicemail-drops/${encodeURIComponent(row.id)}/proof`}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="text-xs underline"
+        >
+          Proof of delivery
+        </a>
+      ) : null}
     </div>
   );
 }

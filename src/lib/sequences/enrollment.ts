@@ -47,6 +47,33 @@ export async function enrollLead(
     propertyId: string;
     enrolledByUserId?: string | null;
     deferEvent?: boolean;
+    /**
+     * Earliest moment the first text may go out. The first run is the LATER of
+     * this and the first step's own delay. Omitted = unchanged behaviour
+     * (the button path).
+     */
+    firstSendNotBefore?: Date;
+    /** Which auto-route created this enrolment (immutable identity used by takeover pauses). */
+    /** Hot-lead fence: the triggering inbound. Born paused if a person took over / the seller replied again after it (DB trigger reads its time at full precision). */
+    hotFenceMessageId?: string;
+    /**
+     * Start at the second text: the first step is treated as already done (its
+     * message went out by another route, e.g. the identity reply). Refused with
+     * `no_steps` when the drip has no second step (nothing would ever be sent).
+     */
+    skipFirstStep?: boolean;
+    autoRoute?: "maybe_later" | "check_in_60" | "listed_not_selling" | "hot_book_appointment";
+    /**
+     * The person to text when the lead has no saved homeowner (imports that
+     * link people only through `property_contacts`). Used ONLY when
+     * `homeowner_contact_id` is empty, and only if this contact is linked to
+     * the property in the same org; otherwise the enrolment is refused
+     * `no_phone` as before. Suppression, line type and consent are checked on
+     * this contact, and it is the enrolment's recipient. With a saved
+     * homeowner this is ignored. Never inferred: the caller names the contact
+     * (e.g. the one who just replied).
+     */
+    contactId?: string;
   },
 ): Promise<EnrollmentOutcome> {
   await assertNotTrainingTarget(client, { propertyId: params.propertyId });
@@ -77,6 +104,18 @@ export async function enrollLead(
     .maybeSingle();
   if (stepErr) return { status: "failed", message: stepErr.message };
   if (!step0) return { status: "no_steps" };
+  let startStep = { index: 0, delayMinutes: step0.delay_after_previous_minutes };
+  if (params.skipFirstStep) {
+    const { data: step1, error: step1Err } = await client
+      .from("sequence_steps")
+      .select("delay_after_previous_minutes")
+      .eq("sequence_id", params.sequenceId)
+      .eq("step_index", 1)
+      .maybeSingle();
+    if (step1Err) return { status: "failed", message: step1Err.message };
+    if (!step1) return { status: "no_steps" };
+    startStep = { index: 1, delayMinutes: step1.delay_after_previous_minutes };
+  }
 
   // Load property + its homeowner contact + phone in one round-trip.
   const { data: prop, error: propErr } = await client
@@ -146,7 +185,7 @@ export async function enrollLead(
   };
   const rawHomeowner = prop.homeowner as unknown as
     HomeownerJoin | HomeownerJoin[] | null;
-  const homeowner = Array.isArray(rawHomeowner)
+  let homeowner = Array.isArray(rawHomeowner)
     ? (rawHomeowner[0] ?? null)
     : rawHomeowner;
   if (prop.is_dnc_locked) {
@@ -159,6 +198,15 @@ export async function enrollLead(
       status: "suppressed",
       message: `A rep is handling this lead personally (${label[0]!.toUpperCase()}${label.slice(1)}). Change the outcome to start a drip.`,
     };
+  }
+  if (!prop.homeowner_contact_id && params.contactId) {
+    const explicit = await loadLinkedContact(client, {
+      orgId: prop.org_id,
+      propertyId: params.propertyId,
+      contactId: params.contactId,
+    });
+    if (explicit.status === "failed") return explicit;
+    homeowner = explicit.contact;
   }
   if (!homeowner && prop.homeowner_contact_id) {
     return { status: "suppressed", message: "Contact details could not be verified." };
@@ -204,7 +252,11 @@ export async function enrollLead(
   }
 
   // Calculate first fire time — delay of step 0 from enrollment moment.
-  const nextRunAt = delayToDate(step0.delay_after_previous_minutes, new Date());
+  const stepRunAt = delayToDate(startStep.delayMinutes, new Date());
+  const nextRunAt =
+    params.firstSendNotBefore && params.firstSendNotBefore.getTime() > stepRunAt.getTime()
+      ? params.firstSendNotBefore
+      : stepRunAt;
 
   // INSERT — partial unique indexes enforce both the same-sequence and
   // property-wide live enrollment rules atomically.
@@ -216,9 +268,12 @@ export async function enrollLead(
       property_id: params.propertyId,
       contact_id: homeowner.id,
       status: "active",
-      current_step_index: 0,
+      current_step_index: startStep.index,
       next_run_at: nextRunAt.toISOString(),
       enrolled_by_user_id: params.enrolledByUserId ?? null,
+      ...(params.autoRoute ? { auto_enrolled_route: params.autoRoute } : {}),
+      ...(params.firstSendNotBefore ? { first_send_not_before: params.firstSendNotBefore.toISOString() } : {}),
+      ...(params.hotFenceMessageId ? { hot_fence_message_id: params.hotFenceMessageId } : {}),
     })
     .select("id")
     .single();
@@ -284,6 +339,23 @@ export async function enrollLead(
 }
 
 /**
+ * Pauses that clear on their own (the softphone call ending, the Norma call
+ * finishing) must never take over a voicemail drop reconciliation hold.
+ */
+const AUTO_RESUMED_PAUSE_REASONS: ReadonlySet<PauseReason> = new Set(["call_in_progress", "norma_call"]);
+
+/**
+ * Which rows a non-permanent stop pauses (STOP_TAKES_OVER_RECONCILIATION):
+ * active ones, plus an enrollment
+ * paused reconciliation_required (an unknown voicemail drop POST), so a reply
+ * or call-back during reconciliation sticks. One UPDATE: Postgres re-checks
+ * this WHERE after waiting on a row lock, so if the drop resolver commits
+ * first the stop still pauses the now-active row, and if the stop commits
+ * first the resolver advances in place and keeps the stop reason.
+ */
+const STOP_TAKES_OVER_RECONCILIATION = "status.eq.active,and(status.eq.paused,pause_reason.eq.reconciliation_required)";
+
+/**
  * Pause every active enrollment for a property with the given reason.
  * Called from:
  *   - the inbound webhook on a regular reply (reason='inbound_reply')
@@ -316,7 +388,9 @@ export async function pausePropertyEnrollments(
     .eq("property_id", params.propertyId);
   pauseQuery = params.permanent
     ? pauseQuery.in("status", ["active", "paused"])
-    : pauseQuery.eq("status", "active");
+    : AUTO_RESUMED_PAUSE_REASONS.has(params.reason)
+      ? pauseQuery.eq("status", "active")
+      : pauseQuery.or(STOP_TAKES_OVER_RECONCILIATION);
   const { data: pausedRows, error } = await pauseQuery.select("id, sequence_id");
   if (error) {
     throw new Error(`pausePropertyEnrollments: ${error.message}`);
@@ -470,7 +544,9 @@ export async function pauseContactEnrollments(
     .in("property_id", propertyIds);
   pauseQuery = params.permanent
     ? pauseQuery.in("status", ["active", "paused"])
-    : pauseQuery.eq("status", "active");
+    : AUTO_RESUMED_PAUSE_REASONS.has(params.reason)
+      ? pauseQuery.eq("status", "active")
+      : pauseQuery.or(STOP_TAKES_OVER_RECONCILIATION);
   const { data: pausedRows, error } = await pauseQuery.select("id, property_id, sequence_id");
   if (error) {
     throw new Error(`pauseContactEnrollments: ${error.message}`);
@@ -632,4 +708,59 @@ export async function retrySequenceStep(
     },
   });
   return { status: "retried" };
+}
+
+type LinkedContact = {
+  id: string;
+  phone_1: string | null;
+  phone_1_type: string | null;
+  phone_2: string | null;
+  phone_2_type: string | null;
+  phone_3: string | null;
+  phone_3_type: string | null;
+  do_not_contact: boolean;
+  sms_opted_out: boolean;
+};
+
+/**
+ * The explicit contact, only when it belongs to this org and is linked to this
+ * property through `property_contacts`. `contact: null` (not linked, not found,
+ * other org) falls through to the existing `no_phone` refusal.
+ */
+async function loadLinkedContact(
+  client: SupabaseClient<Database>,
+  a: { orgId: string; propertyId: string; contactId: string },
+): Promise<{ status: "ok"; contact: LinkedContact | null } | { status: "failed"; message: string }> {
+  const { data: link, error: linkErr } = await client
+    .from("property_contacts")
+    .select("contact_id")
+    .eq("org_id", a.orgId)
+    .eq("property_id", a.propertyId)
+    .eq("contact_id", a.contactId)
+    .limit(1)
+    .maybeSingle();
+  if (linkErr) return { status: "failed", message: linkErr.message };
+  if (!link) return { status: "ok", contact: null };
+  const { data: contact, error: contactErr } = await client
+    .from("contacts")
+    .select("id, org_id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
+    .eq("id", a.contactId)
+    .eq("org_id", a.orgId)
+    .maybeSingle();
+  if (contactErr) return { status: "failed", message: contactErr.message };
+  if (!contact || contact.id !== a.contactId || contact.org_id !== a.orgId) return { status: "ok", contact: null };
+  return {
+    status: "ok",
+    contact: {
+      id: contact.id,
+      phone_1: contact.phone_1,
+      phone_1_type: contact.phone_1_type,
+      phone_2: contact.phone_2,
+      phone_2_type: contact.phone_2_type,
+      phone_3: contact.phone_3,
+      phone_3_type: contact.phone_3_type,
+      do_not_contact: contact.do_not_contact,
+      sms_opted_out: contact.sms_opted_out,
+    },
+  };
 }

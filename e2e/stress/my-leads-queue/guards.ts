@@ -1,0 +1,115 @@
+import { requireLoopbackPostgresUrl } from "../../../src/lib/testing/loopback-postgres-url";
+
+/**
+ * Lane guards for the My Leads queue stress harness. They run before any connection is opened and fail closed.
+ *
+ *  - The database URL comes ONLY from an explicit variable (MYLEADS_STRESS_DB_URL, then TEST_SUPABASE_DB_URL). There is no
+ *    default: the shared local stack (127.0.0.1:54329) is never used implicitly. This harness never opens, reads or parses a `.env*` file: a remote URL cannot arrive that way.
+ *  - The URL must be loopback (127.0.0.1 / localhost / [::1]), with no query string that could redirect the host.
+ *  - No hosted Supabase project reference may appear anywhere in the environment variables this harness reads.
+ *  - Lanes that COMMIT rows (races) additionally require the explicit acknowledgement MYLEADS_STRESS_DISPOSABLE_DB=1 and refuse
+ *    a database that already holds non-harness leads. Read-only/rolled-back lanes never commit anything.
+ *  - Providers are never called: the only sender is the in-process fake (races.ts sqlSendDriver, and the mocked provider and
+ *    sendSmsToContact in race.dispatch.integration.test.ts).
+ */
+export const HARNESS_ADDRESS_PREFIX = "S1RACE ";
+/** Ports of the machine-wide shared local Supabase stack. The harness commits and deletes rows, so it never runs there. */
+export const SHARED_STACK_DB_PORT = "54329";
+export const SHARED_STACK_API_PORT = "54331";
+
+export class GuardRefusal extends Error {
+  constructor(public readonly code: string, message: string) {
+    super(`${code}: ${message}`);
+    this.name = "GuardRefusal";
+  }
+}
+
+type Env = Readonly<Record<string, string | undefined>>;
+const HOSTED = /ncsngxlcyxylaeskiteu|copflsklaefwzipsrjqz|\.supabase\.co\b|\.supabase\.in\b|\.pooler\.supabase\.com\b|\.neon\.tech\b|\.rds\.amazonaws\.com\b/i;
+
+export function resolveDbUrl(env: Env = process.env): string {
+  const url = env.MYLEADS_STRESS_DB_URL ?? env.TEST_SUPABASE_DB_URL;
+  if (!url) {
+    throw new GuardRefusal("DB_URL_UNSET", "set MYLEADS_STRESS_DB_URL (or TEST_SUPABASE_DB_URL) to your own disposable stack; there is no default, so the shared local stack is never used by accident.");
+  }
+  try {
+    requireLoopbackPostgresUrl(url);
+  } catch {
+    throw new GuardRefusal("DB_NOT_LOOPBACK", "the stress harness only runs against a loopback Postgres (127.0.0.1 / localhost / [::1]) with no query string.");
+  }
+  const port = new URL(url).port;
+  if (!port) {
+    throw new GuardRefusal("DB_PORT_UNSET", "the database URL must name its port explicitly; without one, the Postgres client falls back to PGPORT, which could point at the shared local stack.");
+  }
+  if (port === SHARED_STACK_DB_PORT) {
+    throw new GuardRefusal("DB_SHARED_STACK", `port ${SHARED_STACK_DB_PORT} is the shared local stack; point the harness at your own disposable stack.`);
+  }
+  return url;
+}
+
+/**
+ * The vitest integration lanes (smoke, dispatch races) run under vitest.local-integration.config.ts, which injects a
+ * TEST_SUPABASE_DB_URL default pointing at the shared local stack. So these lanes accept ONLY MYLEADS_STRESS_DB_URL and never
+ * fall back to TEST_SUPABASE_DB_URL: a config default can never select the database.
+ */
+export function resolveIntegrationDbUrl(env: Env = process.env): string {
+  if (!env.MYLEADS_STRESS_DB_URL) {
+    throw new GuardRefusal("DB_URL_UNSET", "set MYLEADS_STRESS_DB_URL to your own disposable stack; the integration lanes ignore TEST_SUPABASE_DB_URL because the vitest config defaults it to the shared local stack.");
+  }
+  return resolveDbUrl({ MYLEADS_STRESS_DB_URL: env.MYLEADS_STRESS_DB_URL });
+}
+
+/**
+ * The environment the vitest integration lanes pass to everything they call: the database is resolved through
+ * resolveIntegrationDbUrl (MYLEADS_STRESS_DB_URL only), and the config-injected TEST_SUPABASE_DB_URL is removed so no
+ * downstream resolveDbUrl fallback can ever pick the shared local stack.
+ */
+export function integrationEnv(env: Env = process.env): Record<string, string | undefined> & { MYLEADS_STRESS_DB_URL: string } {
+  assertEnvLooksLocal(env);
+  const url = resolveIntegrationDbUrl(env);
+  const out: Record<string, string | undefined> & { MYLEADS_STRESS_DB_URL: string } = { ...env, MYLEADS_STRESS_DB_URL: url };
+  delete out.TEST_SUPABASE_DB_URL;
+  return out;
+}
+
+/** The dispatch race lanes need the disposable stack's API; there is no default. */
+export function resolveIntegrationApiUrl(env: Env = process.env): string {
+  const url = env.LOCAL_SUPABASE_URL;
+  if (!url) throw new GuardRefusal("API_URL_UNSET", "set LOCAL_SUPABASE_URL to your own disposable stack's API; there is no default.");
+  let port = "";
+  try { port = new URL(url).port; } catch { throw new GuardRefusal("API_URL_INVALID", "LOCAL_SUPABASE_URL is not a URL."); }
+  if (port === SHARED_STACK_API_PORT) {
+    throw new GuardRefusal("API_SHARED_STACK", `port ${SHARED_STACK_API_PORT} is the shared local stack's API; point the harness at your own disposable stack.`);
+  }
+  return url;
+}
+
+export function assertEnvLooksLocal(env: Env = process.env): void {
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !/^(MYLEADS_STRESS_.*|TEST_SUPABASE_.*|NEXT_PUBLIC_SUPABASE_URL|SUPABASE_URL|DATABASE_URL|E2E_CI_SUPABASE_DB_URL)$/.test(key)) continue;
+    if (HOSTED.test(value)) throw new GuardRefusal("HOSTED_REF_IN_ENV", `${key} points at a hosted service; refusing.`);
+  }
+}
+
+export function assertCommitLaneAllowed(env: Env = process.env): void {
+  if (env.MYLEADS_STRESS_DISPOSABLE_DB !== "1")
+    throw new GuardRefusal("DISPOSABLE_DB_NOT_ACKNOWLEDGED", "set MYLEADS_STRESS_DISPOSABLE_DB=1 to confirm this database is a disposable local one before a lane that commits rows (the race lanes).");
+}
+
+/**
+ * The foreign-lead check before a committing lane may be skipped ONLY on the CI provisioner's disposable database, whose
+ * earlier steps leave their own rows. The E2E_DISPOSABLE_DATABASE=1 marker alone is not enough: a local operator can set it,
+ * so the skip also requires the same runner signals the provisioner itself demands (scripts/provision-e2e-local-database.mjs):
+ * GITHUB_ACTIONS=true with RUNNER_TEMP and GITHUB_ENV present. (CI is not used: e2e.yml sets CI=1, not "true".) Everywhere
+ * else the check runs.
+ */
+export function foreignLeadCheckRequired(env: Env = process.env): boolean {
+  const ciDisposable = env.E2E_DISPOSABLE_DATABASE === "1" && env.GITHUB_ACTIONS === "true" && Boolean(env.RUNNER_TEMP) && Boolean(env.GITHUB_ENV);
+  return !ciDisposable;
+}
+
+/** The race lanes commit; refuse a database that holds any lead this harness did not create. */
+export function assertOnlyHarnessLeads(counts: { properties: number; foreign: number }): void {
+  if (counts.foreign > 0)
+    throw new GuardRefusal("NON_HARNESS_DATA", `${counts.foreign} of ${counts.properties} leads were not created by this harness; the race lanes only run on an otherwise empty disposable database.`);
+}

@@ -100,6 +100,9 @@ export async function getDripDetail(sequenceId: string): Promise<Result<DripDeta
     const lastInbound = new Map<string, string>();
     for (const property of repliesResult.data ?? []) if (property.inbound_messages[0]) lastInbound.set(property.id, property.inbound_messages[0].created_at);
     const canceled = new Set((canceledResult.data ?? []).map((event) => event.source_id));
+    // Routing v2: an enrollment retired by a newer reply ("rerouted") or stopped by the flag
+    // ("flag_off") is completed in the table but did not finish the drip; show it as stopped.
+    for (const id of await routingV2EndedEarly(supabase, completedIds)) canceled.add(id);
     const count = sequenceResult.data.steps.length;
     return ok({ sequence: sequenceResult.data, stats: statResult.data ?? [], peopleCount: enrollmentsResult.count ?? enrollments.length,
       people: enrollments.map((row) => {
@@ -118,4 +121,26 @@ export async function getDripDetail(sequenceId: string): Promise<Result<DripDeta
   } catch (error) {
     return errFromUnknown(error, "DRIP_DETAIL_FAILED");
   }
+}
+
+async function routingV2EndedEarly(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  completedIds: string[],
+): Promise<string[]> {
+  if (!completedIds.length) return [];
+  // ended_reason is not in the generated types yet.
+  const loose = supabase as unknown as {
+    from: (t: string) => { select: (c: string) => { in: (k: string, v: string[]) => Promise<{ data: Array<{ id: string; ended_reason: string | null }> | null; error: { message?: string } | null }> } };
+  };
+  const ids: string[] = [];
+  for (let offset = 0; offset < completedIds.length; offset += 200) {
+    const { data, error } = await loose.from("sequence_enrollments").select("id, ended_reason")
+      .in("id", completedIds.slice(offset, offset + 200));
+    if (error) {
+      if (/ended_reason/.test(error.message ?? "")) return []; // before the migration
+      throw error;
+    }
+    for (const row of data ?? []) if (row.ended_reason === "rerouted" || row.ended_reason === "flag_off") ids.push(row.id);
+  }
+  return ids;
 }

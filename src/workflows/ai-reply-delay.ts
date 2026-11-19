@@ -10,11 +10,14 @@ import {
   isRetryOutcome,
   recordRetryScheduled,
   type AiRetryOutcome,
+  type NineDeferral,
   type RetryReply,
 } from "@/lib/ai-responder/retry";
 import { recordAiResponderOutcomeForThread } from "@/lib/messages/ai-responder-thread-state";
 import { markInboundMessageState } from "@/lib/messaging/inbound-state";
 import { finishRunFromOutcome, resumeRun } from "@/lib/pipeline-runs";
+import { runRoutingV2Shadow } from "@/lib/sms-classification/routing-v2/shadow";
+import { recordRoutingV2Audit } from "@/lib/sms-classification/routing-v2/live-dispatch";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type AiReplyDelayParams = {
@@ -32,6 +35,8 @@ export type AiReplyDelayParams = {
   retryAttempt?: number;
   /** The reply the previous attempt generated, re-sent verbatim (never logged). */
   retryReply?: RetryReply;
+  /** A nine-question reply deferred until the send window opens (never logged). */
+  nineDeferral?: NineDeferral;
 };
 
 async function dispatchStep(
@@ -61,6 +66,7 @@ async function dispatchStep(
         : {}),
       ...(params.retryAttempt ? { retryAttempt: params.retryAttempt } : {}),
       ...(params.retryReply ? { retryReply: params.retryReply } : {}),
+      ...(params.nineDeferral ? { nineDeferral: params.nineDeferral } : {}),
     },
     {
       anthropic: new Anthropic(),
@@ -94,6 +100,38 @@ async function dispatchStep(
   return outcome;
 }
 
+/**
+ * Routing v2 PR-A: record-only shadow as its OWN step, run only after `dispatchStep`
+ * has finished the run and stamped the inbound. Never throws, so it cannot fail or
+ * retry the live step; a slow shadow only delays this step, never the live stamping.
+ */
+export async function routingV2ShadowStep(
+  params: AiReplyDelayParams,
+  liveOutcome: string,
+): Promise<void> {
+  "use step";
+
+  // Routing v2 AUDIT: the run is finished; one audit row per inbound (no-op if v2 decided it).
+  await recordRoutingV2Audit(createAdminClient(), {
+    propertyId: params.propertyId,
+    inboundMessageId: params.inboundMessageId,
+    conversationId: params.conversationId,
+    note: `dispatch:${liveOutcome}`,
+  }).catch(() => undefined);
+  await runRoutingV2Shadow(
+    createAdminClient(),
+    {
+      propertyId: params.propertyId,
+      contactId: params.contactId,
+      conversationId: params.conversationId,
+      inboundMessageId: params.inboundMessageId,
+      inboundBody: params.inboundBody,
+      liveOutcome,
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "" },
+  ).catch(() => undefined);
+}
+
 export async function aiReplyDelayWorkflow(
   params: AiReplyDelayParams,
 ): Promise<AiDispatchOutcome> {
@@ -102,16 +140,26 @@ export async function aiReplyDelayWorkflow(
   if (params.delaySeconds > 0) {
     await sleep(`${params.delaySeconds}s`);
   }
-  let outcome = await dispatchStep(params);
+  let current = params;
+  let outcome = await dispatchStep(current);
   // Bounded: dispatch itself returns a terminal outcome once retryAttempt
-  // reaches REPLY_RETRY_MAX (dead-letter + flag), so this loop always ends.
+  // reaches REPLY_RETRY_MAX (dead-letter + flag), and a nine-question deferral
+  // at most NINE_DEFER_MAX times, so this loop always ends.
   while (isRetryOutcome(outcome)) {
     await sleep(`${outcome.delaySeconds}s`);
-    outcome = await dispatchStep({
-      ...params,
+    current = {
+      // `current`, not the original params: a deferral (its count and its wait,
+      // which was the reply's delay, so the run is not a zero-delay send) carries
+      // forward through any ordinary retry that follows it.
+      ...current,
       retryAttempt: outcome.attempt,
       ...(outcome.reply ? { retryReply: outcome.reply } : {}),
-    });
+      ...(outcome.nineDeferral
+        ? { nineDeferral: outcome.nineDeferral, delaySeconds: outcome.delaySeconds }
+        : {}),
+    };
+    outcome = await dispatchStep(current);
   }
+  await routingV2ShadowStep(current, outcome.outcome);
   return outcome;
 }

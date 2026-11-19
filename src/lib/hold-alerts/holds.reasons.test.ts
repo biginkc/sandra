@@ -3,8 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { isHotHold, isKnownHoldReason, parseHotHoldReasons } from "./holds";
-import type { OpenHold, PipelineRun } from "@/app/(dashboard)/messages-v2/types";
+import { isKnownHoldReason } from "./holds";
 
 const root = join(__dirname, "..", "..", "..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
@@ -12,6 +11,9 @@ const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 /** Every reason literal the responder / inbound pipeline writes as a flag or run reason. */
 function emittedReasons(source: string): string[] {
   const out = new Set<string>();
+  // `nine_questions:<answer>` is the run OUTCOME reason (and the review's ai_reason), never a
+  // hold: it is written beside `outcome: "auto_closed"` / to the disposition review. Leave it out.
+  source = source.replace(/"nine_questions:[a-z_]*"|`nine_questions:\$\{[^`]*\}`/g, '""');
   const literal = /(?:\breason\s*=|\breason:|\bflagReason:)\s*"([a-z][a-z0-9_:]*)"/g;
   for (const m of source.matchAll(literal)) out.add(m[1]!);
   // Template reasons: the fixed prefix before `${` is what must be recognised.
@@ -20,6 +22,9 @@ function emittedReasons(source: string): string[] {
   // Third argument of markPropertyNeedsAttention(supabase, id, "literal"...).
   const flagCall = /markPropertyNeedsAttention\(\s*[\w.]+,\s*[\w.]+,\s*"([a-z][a-z0-9_:]*)"/g;
   for (const m of source.matchAll(flagCall)) out.add(m[1]!);
+  // Reasons handed to the nine-question engine's hold helper: nineHoldAndComplete(supabase, a, <reason>).
+  const nineHold = /nineHoldAndComplete\(\s*[\w.]+,\s*[\w.]+,\s*(?:"([a-z][a-z0-9_:]*)"|`([a-z][a-z0-9_:]*)\$\{)/g;
+  for (const m of source.matchAll(nineHold)) out.add(m[1] ?? `${m[2]}x`);
   return [...out];
 }
 
@@ -69,23 +74,5 @@ describe("needs-confirm hold reasons (no automated DNC decisions)", () => {
       "model_opt_out_needs_confirm",
     ]);
     for (const c of consts) expect(isKnownHoldReason(c), c).toBe(true);
-  });
-});
-
-describe("wildcard hot entries", () => {
-  const hold = (flag_reason: string) => ({ flag_reason, sources: ["needs_attention"] }) as unknown as OpenHold<PipelineRun>;
-  it("accepts prefix and :backed suffix wildcards, rejects others", () => {
-    const warn = () => {};
-    expect(parseHotHoldReasons({ HOLD_ALERT_HOT_REASONS: "dead_letter_failed:*,*:backed,foo:*,*bar,a*b" }, warn)).toEqual([
-      "dead_letter_failed:*",
-      "*:backed",
-    ]);
-  });
-  it("matches by prefix and suffix, not substring", () => {
-    const hot = ["dead_letter_failed:*", "*:backed"];
-    expect(isHotHold(hold("dead_letter_failed:send_timeout:1"), hot)).toBe(true);
-    expect(isHotHold(hold("send_timeout:1:backed"), hot)).toBe(true);
-    expect(isHotHold(hold("x_dead_letter_failed:y"), hot)).toBe(false);
-    expect(isHotHold(hold("send_timeout:1"), hot)).toBe(false);
   });
 });

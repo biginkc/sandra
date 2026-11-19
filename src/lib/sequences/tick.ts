@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { testBarrier } from "@/lib/testing/test-barriers";
 import {
   sendSmsToContact,
   type SequenceAttemptOutcome,
@@ -14,6 +15,17 @@ import { applyOptOut } from "./opt-out";
 import { evaluatePause } from "./pause-rules";
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
+import { rapidOfferBlocksSend } from "@/lib/templates/rapid-offer";
+import { processVoicemailDropStep } from "./voicemail-drop-step";
+import { hasSlotToken } from "./routing-v2/slot-time";
+import {
+  loadRoutingV2Key,
+  routingV2AdvanceAfterSend,
+  routingV2ClaimDripSend,
+  routingV2MarkDripClaimSent,
+  routingV2RecordProviderOutcome,
+  routingV2TickGate,
+} from "./routing-v2/tick-gate";
 
 const FIRST_TOUCH_SENDER_PAUSE_REASON =
   "no approved sender for first-touch sequence send";
@@ -57,6 +69,11 @@ export type TickOutcome =
   | { status: "rescheduled_consent_unavailable"; enrollmentId: string; nextRunAt: string; reason: "consent_unavailable" }
   | { status: "skipped_already_claimed"; enrollmentId: string }
   | { status: "skipped_no_step"; enrollmentId: string }
+  | { status: "voicemail_queued"; enrollmentId: string; stepIndex: number; dropId: string }
+  | { status: "skipped_not_eligible"; enrollmentId: string; stepIndex: number; reason: string }
+  | { status: "rescheduled_daily_cap"; enrollmentId: string; nextRunAt: string }
+  | { status: "rescheduled_slot_window"; enrollmentId: string; nextRunAt: string }
+  | { status: "rescheduled_provider_not_queued"; enrollmentId: string; nextRunAt: string }
   | { status: "failed"; enrollmentId: string; message: string };
 
 /** A live provider attempt gets this long before requiring reconciliation. */
@@ -80,7 +97,7 @@ export async function processEnrollmentTick(
   // 1. Load current step.
   const { data: step, error: stepErr } = await client
     .from("sequence_steps")
-    .select("id, step_index, action_type, template_body, template_id, template_category, target_status, delay_after_previous_minutes")
+    .select("id, step_index, action_type, template_body, template_id, template_category, target_status, delay_after_previous_minutes, vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category")
     .eq("sequence_id", enrollment.sequence_id)
     .eq("step_index", enrollment.current_step_index)
     .maybeSingle();
@@ -109,6 +126,7 @@ export async function processEnrollmentTick(
         message: completionError?.message ?? "enrollment changed before completion",
       };
     }
+    // No automatic handoff at drip end (Master A-004): a finished v2 drip is plain completed.
     return { status: "completed", enrollmentId: enrollment.id };
   }
 
@@ -196,6 +214,71 @@ export async function processEnrollmentTick(
     };
   }
 
+  // 2b. Routing v2 drips only (legacy sequences pass straight through): send-time re-check of
+  // flags + eligibility + takeover + suppression, and the booking texts' dynamic slot time.
+  let routingV2SlotLabel: string | null = null;
+  let routingV2Gate;
+  try {
+    routingV2Gate = await routingV2TickGate(client, {
+      enrollmentId: enrollment.id,
+      sequenceId: enrollment.sequence_id,
+      stepId: step.id,
+      actionType: step.action_type,
+      templateBody: step.template_body,
+      propertyId: enrollment.property_id,
+      propertyState: property.state,
+    });
+  } catch (err) {
+    return { status: "failed", enrollmentId: enrollment.id, message: err instanceof Error ? err.message : String(err) };
+  }
+  await testBarrier("tick:after_send_check", { propertyId: enrollment.property_id, enrollmentId: enrollment.id });
+  if (routingV2Gate.kind === "error") {
+    return { status: "failed", enrollmentId: enrollment.id, message: routingV2Gate.message };
+  }
+  if (routingV2Gate.kind === "blocked" && routingV2Gate.reason === "reply_pending") {
+    // A-2 F5: this v2 drip's own road reply is still queued. The drip stays active and looks
+    // again a minute later; its step never goes out ahead of the reply.
+    const { error: waitError } = await client
+      .from("sequence_enrollments")
+      .update({ next_run_at: new Date(Date.now() + REPLY_PENDING_RETRY_MS).toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", enrollment.id)
+      .eq("status", "active")
+      .eq("current_step_index", enrollment.current_step_index);
+    if (waitError) return { status: "failed", enrollmentId: enrollment.id, message: waitError.message };
+    return routingV2BlockedOutcome(enrollment.id, step.step_index, routingV2Gate.reason);
+  }
+  if (routingV2Gate.kind === "blocked") {
+    return routingV2BlockedOutcome(enrollment.id, step.step_index, routingV2Gate.reason);
+  }
+  if (routingV2Gate.kind === "hold") {
+    // Needs a person (seller time zone not confirmed): never guess, never send. Own hold
+    // reason "timezone_unconfirmed" (Couldn't send in Needs person).
+    const pauseError = await pauseEnrollment(client, enrollment.id, routingV2Gate.reason, false);
+    if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+    return { status: "paused", enrollmentId: enrollment.id, reason: `routing_v2_${routingV2Gate.reason}` };
+  }
+  if (routingV2Gate.kind === "wait") {
+    const nextRunAt = routingV2Gate.nextRunAt.toISOString();
+    const { data: waited, error: waitError } = await client
+      .from("sequence_enrollments")
+      .update({ next_run_at: nextRunAt, updated_at: new Date().toISOString() })
+      .eq("id", enrollment.id)
+      .eq("status", "active")
+      .eq("current_step_index", enrollment.current_step_index)
+      .select("id")
+      .maybeSingle();
+    if (waitError || !waited) {
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: waitError?.message ?? "Enrollment changed before slot-window reschedule",
+      };
+    }
+    return { status: "rescheduled_slot_window", enrollmentId: enrollment.id, nextRunAt };
+  }
+  const isRoutingV2 = routingV2Gate.kind === "send";
+  if (routingV2Gate.kind === "send") routingV2SlotLabel = routingV2Gate.slotLabel;
+
   // 3. Claim the fire. Double-fire safety via unique (enrollment_id, step_id).
   const { data: claim, error: claimErr } = await client
     .from("sequence_step_runs")
@@ -278,6 +361,7 @@ export async function processEnrollmentTick(
       propertyId: enrollment.property_id,
       contactId: enrollment.contact_id,
     });
+    if (routingV2SlotLabel) vars.slot_time = routingV2SlotLabel;
 
     // Load the sequence to honor its `append_opt_out` setting.
     const { data: seq } = await client
@@ -393,12 +477,57 @@ export async function processEnrollmentTick(
       };
     }
 
+    // A {{slot_time}} only has a value on a routing v2 send: never send it blank.
+    if (!isRoutingV2 && hasSlotToken(bodySource)) {
+      const runError = await markRunSkipped(client, claim.id, "provider_failed", "not_attempted", "slot_time outside routing v2");
+      if (runError) {
+        return failAfterRunWrite(client, enrollment.id, runError, "Slot-time bookkeeping failed");
+      }
+      const pauseError = await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+      if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+      return { status: "paused", enrollmentId: enrollment.id, reason: "step_misconfigured" };
+    }
+
+    // {{rapid_offer}} with no stored property value: never send a blank offer.
+    if (rapidOfferBlocksSend(bodySource, vars)) {
+      const runError = await markRunSkipped(client, claim.id, "provider_failed", "not_attempted", "rapid_offer has no property value");
+      if (runError) {
+        return failAfterRunWrite(client, enrollment.id, runError, "Rapid-offer bookkeeping failed");
+      }
+      const pauseError = await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+      if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+      return { status: "paused", enrollmentId: enrollment.id, reason: "step_misconfigured" };
+    }
+
     const rendered = renderTemplate(bodySource, vars);
     const finalBody = applyOptOut(rendered, {
       append_opt_out: appendOptOut,
       // Seed the rotation with the claim id so a retry picks the same variant.
       seed: claim.id,
     });
+
+    // Routing v2: atomic check-and-claim under the property lock, immediately before the send.
+    // A reply transition after this point cancels the claim and retires the enrollment, which
+    // the provider fence inside sendSmsToContact (authorize_sequence_provider_attempt) refuses.
+    if (isRoutingV2) {
+      const v2Claim = await routingV2ClaimDripSend(client, enrollment.id, claim.id);
+      if (!v2Claim.ok) {
+        const skipReason =
+          v2Claim.reason === "suppressed"
+            ? "consent_revoked"
+            : v2Claim.reason === "person_took_over"
+              ? "paused"
+              : "not_eligible";
+        const runError = await markRunSkipped(client, claim.id, skipReason, "not_attempted", v2Claim.reason);
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Routing v2 claim bookkeeping failed");
+        }
+        if (v2Claim.error) {
+          return { status: "failed", enrollmentId: enrollment.id, message: v2Claim.reason };
+        }
+        return routingV2BlockedOutcome(enrollment.id, step.step_index, v2Claim.reason);
+      }
+    }
 
     const outcome = await sendSmsToContact(client, {
       origin: "automated",
@@ -418,6 +547,33 @@ export async function processEnrollmentTick(
         claimId: claim.id,
       },
     });
+
+    // Routing v2: close the claim with the provider outcome IMMEDIATELY, for every outcome that
+    // may have reached the seller (accepted, or accepted-but-receipt-failed, or unknown), so a
+    // failed write or a reply landing before the bookkeeping can never report it as cancelled.
+    // Provider definitely not reached -> "not_sent" (terminal), so no claim is left open.
+    // R5: record the provider acceptance on the claim itself FIRST (own small write, before the
+    // run write), so a failed run write can never make this send look like a no-attempt. If
+    // this write fails too, the claim stays open and the reconcile reads the run's provider
+    // intent (unknown + message id) -> 'unknown', never 'not_sent'.
+    if (isRoutingV2 && (outcome.status === "sent" || outcome.status === "queued")) {
+      const recordError = await routingV2RecordProviderOutcome(client, claim.id, "accepted", outcome.messageId ?? null);
+      if (recordError) reportError(new Error(recordError), { tags: { context: "routing_v2_record_provider_outcome" }, extra: { enrollmentId: enrollment.id } });
+    }
+    // sent/queued are closed together with the advance (one RPC, below); every other outcome
+    // is closed here.
+    const v2ClaimOutcome =
+      isRoutingV2 && outcome.status !== "sent" && outcome.status !== "queued"
+        ? (routingV2ProviderClaimOutcome(outcome) ?? "not_sent")
+        : null;
+    // Accepted-but-receipt-failed: record the acceptance first (R7: 'sent' needs it).
+    if (v2ClaimOutcome === "sent") {
+      const recordError = await routingV2RecordProviderOutcome(client, claim.id, "accepted", "messageId" in outcome ? outcome.messageId ?? null : null);
+      if (recordError) reportError(new Error(recordError), { tags: { context: "routing_v2_record_provider_outcome" }, extra: { enrollmentId: enrollment.id } });
+    }
+    const v2ClaimCloseError = v2ClaimOutcome
+      ? await routingV2MarkDripClaimSent(client, claim.id, v2ClaimOutcome)
+      : null;
 
     switch (outcome.status) {
       case "sent":
@@ -449,7 +605,12 @@ export async function processEnrollmentTick(
             message: `Message ${messageId} accepted; run write failed: ${runError?.message ?? "no run row updated"}${pauseError ? `; ${pauseError}` : ""}`,
           };
         }
-        const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
+        // Routing v2: advance, or complete (+ chain, only if a migration ever configures a next
+        // drip; none does today) in one transaction, so nothing is lost after completion.
+        // Legacy drips keep advanceEnrollment exactly as before.
+        const advanceError = isRoutingV2
+          ? await routingV2AdvanceAfterSend(client, enrollment.id, step.step_index, claim.id)
+          : await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
         if (advanceError) {
           const pauseError = await pauseEnrollment(
             client,
@@ -767,18 +928,23 @@ export async function processEnrollmentTick(
         if (pauseError) {
           return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
         }
+        const baseMessage =
+          "reason" in outcome
+            ? outcome.reason
+            : "error" in outcome
+              ? outcome.error
+              : outcome.status;
         return {
           status: "failed",
           enrollmentId: enrollment.id,
-          message:
-            "reason" in outcome
-              ? outcome.reason
-              : "error" in outcome
-                ? outcome.error
-                : outcome.status,
+          message: v2ClaimCloseError ? `${baseMessage}; ${v2ClaimCloseError}` : baseMessage,
         };
       }
     }
+  }
+
+  if (step.action_type === "send_voicemail_drop") {
+    return processVoicemailDropStep(client, enrollment, step, property, claim.id);
   }
 
   if (step.action_type === "change_status" && step.target_status) {
@@ -892,7 +1058,7 @@ export async function processEnrollmentTick(
  * this was the last step. Separate so the send_sms and change_status
  * branches share it.
  */
-async function advanceEnrollment(
+export async function advanceEnrollment(
   client: SupabaseClient<Database>,
   enrollmentId: string,
   sequenceId: string,
@@ -950,10 +1116,57 @@ async function advanceEnrollment(
       : "enrollment changed before advancement";
 }
 
-async function markRunSkipped(
+/** Which v2 claim outcome a send result implies; null = provider definitely not reached. */
+export function routingV2ProviderClaimOutcome(
+  outcome: Awaited<ReturnType<typeof sendSmsToContact>>,
+): "sent" | "unknown" | null {
+  switch (outcome.status) {
+    case "sent":
+    case "queued":
+      return "sent";
+    case "db_error":
+      if (outcome.deliveryOutcome === "accepted" || (!outcome.deliveryOutcome && outcome.externalId)) return "sent";
+      return outcome.deliveryOutcome === "unknown" ? "unknown" : null;
+    case "provider_unknown":
+      return "unknown";
+    case "provider_failed":
+      if (outcome.providerAttempted === false) return null;
+      return outcome.deliveryOutcome === "accepted"
+        ? "sent"
+        : outcome.deliveryOutcome === "unknown" || outcome.deliveryOutcome === undefined
+          ? "unknown"
+          : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Outcome for a routing v2 refusal. Only takeover / suppression actually paused (or opted out)
+ * the enrollment in SQL; flag_off completed it; not_active / missing / cancelled claims changed
+ * nothing, so they are reported as skips, never as "paused".
+ */
+/** A v2 drip whose own road reply is still queued looks again this much later (A-2 F5). */
+const REPLY_PENDING_RETRY_MS = 60_000;
+
+function routingV2BlockedOutcome(enrollmentId: string, stepIndex: number, reason: string): TickOutcome {
+  if (reason === "person_took_over" || reason === "suppressed") {
+    return { status: "paused", enrollmentId, reason: `routing_v2_${reason}` };
+  }
+  return { status: "skipped_not_eligible", enrollmentId, stepIndex, reason: `routing_v2_${reason}` };
+}
+
+export async function markRunSkipped(
   client: SupabaseClient<Database>,
   runId: string,
-  reason: "quiet_hours" | "consent_revoked" | "paused" | "escalated" | "no_phone" | "provider_failed",
+  reason:
+    | "quiet_hours"
+    | "consent_revoked"
+    | "paused"
+    | "escalated"
+    | "no_phone"
+    | "provider_failed"
+    | "not_eligible",
   attemptOutcome: SequenceAttemptOutcome = "not_attempted",
   failureReason?: string,
 ): Promise<string | null> {
@@ -987,7 +1200,7 @@ async function markRunSkipped(
   return null;
 }
 
-async function failAfterRunWrite(
+export async function failAfterRunWrite(
   client: SupabaseClient<Database>,
   enrollmentId: string,
   runError: string,
@@ -1006,7 +1219,7 @@ async function failAfterRunWrite(
   };
 }
 
-async function pauseEnrollment(
+export async function pauseEnrollment(
   client: SupabaseClient<Database>,
   enrollmentId: string,
   reason: string,

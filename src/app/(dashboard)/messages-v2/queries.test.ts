@@ -411,19 +411,22 @@ function fakeSupabase(results: Record<string, (calls: Call) => Result>) {
       const calls: Call = [];
       queries.push(calls);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "in", "is", "order", "limit", "not", "gte"]) {
+      for (const m of ["select", "eq", "in", "is", "order", "limit", "not", "gte", "range", "gt"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ table, method: m, args });
           return q;
         };
       }
-      q.then = (resolve: (v: Result) => unknown) =>
-        resolve({
-          data: [],
-          error: null,
-          count: null,
-          ...(results[table]?.(calls) ?? {}),
-        });
+      q.then = (resolve: (v: Result) => unknown) => {
+        const r: Result = { data: [], error: null, count: null, ...(results[table]?.(calls) ?? {}) };
+        // Keyset paging: honour .gt(col, v) so a paged read ends with an empty page.
+        const gt = calls.find((c) => c.method === "gt");
+        if (gt && Array.isArray(r.data)) {
+          const [col, v] = gt.args as [string, string];
+          r.data = (r.data as Array<Record<string, unknown>>).filter((row) => String(row[col] ?? "") > v);
+        }
+        return resolve(r);
+      };
       return q;
     },
   };
@@ -1099,6 +1102,7 @@ describe("Phase 1: pending draft exposed for the hold actions", () => {
     expect(holds[0]!.draft).toEqual({
       id: "new",
       inbound_message_id: "m1",
+      run_id: null,
       body: "newer",
       edited_body: "edited",
     });
@@ -1112,7 +1116,7 @@ describe("Phase 1: pending draft exposed for the hold actions", () => {
       drafts: [draft({ id: "d1" })],
       runs: [],
     });
-    expect(holds[0]!.draft).toEqual({ id: "d1", inbound_message_id: "m1" });
+    expect(holds[0]!.draft).toEqual({ id: "d1", inbound_message_id: "m1", run_id: null });
   });
 
   it("includeDraftBody selects body and edited_body; the default never does", async () => {

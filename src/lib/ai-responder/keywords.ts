@@ -134,3 +134,65 @@ export function matchEscalationKeyword(
 
   return null;
 }
+
+/**
+ * True when the body also carries an escalation phrase of a NON-price tier
+ * (handoff request, legal / contract, distressed seller), honouring the org's
+ * allowed phrases. matchEscalationKeyword returns one tier and price wins, so
+ * this is how a caller sees "Dad died, how much?" is also distress.
+ */
+export function hasNonPriceEscalationPhrase(
+  body: string,
+  opts: { allowedPhrases?: ReadonlyArray<string> } = {},
+): boolean {
+  if (!body) return false;
+  const lower = body.toLowerCase();
+  const allowed = opts.allowedPhrases ? new Set(opts.allowedPhrases.map((p) => p.toLowerCase())) : null;
+  for (const [phrase, tier] of PHRASE_TO_TIER) {
+    if (tier === "price_offer") continue;
+    if (allowed && !allowed.has(phrase)) continue;
+    if (lower.includes(phrase)) return true;
+  }
+  return false;
+}
+
+/**
+ * A numeric price signal ("$150k", "200k") counts as a price phrase only when
+ * the org's allow-list includes a price-tier phrase (or there is no allow-list).
+ * Otherwise it is "unlisted": still a reason to hold, never a hot alert.
+ */
+export function priceSignalAllowed(match: KeywordMatch | null, allowedPhrases?: ReadonlyArray<string> | null): boolean {
+  if (!match || match.tier !== "price_offer") return false;
+  if (match.phrase !== "numeric-amount" || !allowedPhrases) return true;
+  const allowed = new Set(allowedPhrases.map((p) => p.toLowerCase()));
+  return TIER_KEYWORDS.price_offer.some((p) => allowed.has(p.toLowerCase()));
+}
+
+/**
+ * Any price signal the org allows, independent of which tier
+ * matchEscalationKeyword picks (it returns only the longest phrase, so
+ * "My lawyer is involved. What's your price?" selects "lawyer"). Price-tier
+ * phrases honour the allow-list; a numeric amount counts only when the
+ * allow-list includes a price phrase (or there is none).
+ */
+export function hasAllowedPriceSignal(body: string, allowedPhrases?: ReadonlyArray<string> | null): boolean {
+  if (!body) return false;
+  const lower = body.toLowerCase();
+  const allowed = allowedPhrases ? new Set(allowedPhrases.map((p) => p.toLowerCase())) : null;
+  const pricePhrases = TIER_KEYWORDS.price_offer.filter((p) => !allowed || allowed.has(p.toLowerCase()));
+  if (pricePhrases.some((p) => lower.includes(p.toLowerCase()))) return true;
+  const numeric = DOLLAR_AMOUNT_REGEX.test(body) || NUMBER_WITH_SCALE_REGEX.test(body);
+  return numeric && (!allowed || pricePhrases.length > 0);
+}
+
+/** The tier of the longest NON-price escalation phrase in the body (honouring the allow-list), or null. */
+export function nonPriceTier(body: string, allowedPhrases?: ReadonlyArray<string> | null): EscalationTier | null {
+  if (!body) return null;
+  const lower = body.toLowerCase();
+  const allowed = allowedPhrases ? new Set(allowedPhrases.map((p) => p.toLowerCase())) : null;
+  const phrases = [...PHRASE_TO_TIER.entries()]
+    .filter(([p, t]) => t !== "price_offer" && (!allowed || allowed.has(p)))
+    .sort((a, b) => b[0].length - a[0].length);
+  for (const [p, t] of phrases) if (lower.includes(p)) return t;
+  return null;
+}

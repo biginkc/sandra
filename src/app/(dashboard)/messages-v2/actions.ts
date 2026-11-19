@@ -7,6 +7,7 @@ import { resolveApprovedTemplateReply } from "@/lib/ai-responder/template-reply"
 import { undoJevAction as undoJevActionCore } from "@/lib/ai-responder/undo";
 import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import { liftModelStopSuppression as liftModelStopSuppressionCore } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
 import type { TeamMember } from "@/lib/auth/team-member";
 import { err, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
@@ -18,6 +19,8 @@ import { createClient } from "@/lib/supabase/server";
 import { retrySuppressionForProperty } from "../leads/[id]/ai-actions";
 import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
 import { authorizeMessagesV2 } from "./authorize";
+import { draftStillOn } from "./hold-list";
+import type { LooseSupabase } from "./queries";
 import type { SeenDraft } from "./hold-action-types";
 import {
   assignHold,
@@ -48,6 +51,7 @@ async function authorize(): Promise<Result<HoldActionDeps>> {
       admin,
       orgId,
       userId,
+      draftOwner: (draftId: string, propertyId: string) => draftStillOn(admin as unknown as LooseSupabase, orgId, draftId, propertyId),
       suppressNumber: async ({ propertyId, contactId, phone, inboundMessageId }) => {
         try {
           // The existing human suppression path: phone-level suppression,
@@ -123,18 +127,43 @@ async function run<T>(action: (deps: HoldActionDeps) => Promise<Result<T>>): Pro
   }
 }
 
-export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft }) {
-  return run((d) => sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen) }));
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Send / Edit carry the property the clicker saw, REQUIRED: missing or malformed -> HOLD_STALE, never sent.
+ * An early check fails fast; the binding check runs again inside the leased send path (hold-actions.ts).
+ */
+async function guardDraftOwner(d: HoldActionDeps, draftId: string, propertyId: unknown): Promise<Result<null>> {
+  if (typeof propertyId !== "string" || !UUID.test(propertyId)) {
+    return err({ code: "HOLD_STALE", message: "Could not tell which lead this draft was for. Nothing was sent; refresh and try again." });
+  }
+  const verdict = await draftStillOn(d.admin as unknown as LooseSupabase, d.orgId, draftId, propertyId);
+  if (verdict === "ok") return { ok: true, data: null };
+  return err({
+    code: "HOLD_STALE",
+    message: verdict === "stale" ? "This draft no longer belongs to this lead. Refresh to see where it is now." : "Could not confirm the draft. Nothing was sent; refresh and try again.",
+  });
 }
 
-export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft }) {
-  return run((d) =>
-    editAndSendHeldDraft(d, {
+export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft; propertyId: string }) {
+  return run(async (d) => {
+    const guard = await guardDraftOwner(d, String(input.draftId), input?.propertyId);
+    if (!guard.ok) return guard;
+    return sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen), expectedPropertyId: String(input.propertyId) });
+  });
+}
+
+export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft; propertyId: string }) {
+  return run(async (d) => {
+    const guard = await guardDraftOwner(d, String(input.draftId), input?.propertyId);
+    if (!guard.ok) return guard;
+    return editAndSendHeldDraft(d, {
       draftId: String(input.draftId),
       body: String(input.body ?? ""),
       seen: seenDraft(input.seen),
-    }),
-  );
+      expectedPropertyId: String(input.propertyId),
+    });
+  });
 }
 
 export async function takeOverHoldAction(input: { propertyId: string; seen: HoldSeen }) {
@@ -256,6 +285,64 @@ export async function findJevUndoAction(inboundMessageId: string): Promise<strin
     return data?.id ?? null;
   } catch (e) {
     reportError(e, { tags: { surface: "messages_v2_find_jev_undo" }, extra: { inboundMessageId: id } });
+    return null;
+  }
+}
+
+/**
+ * Routing v2 PR-I undo: lifts an automatic `model_stop` phone suppression. Audited in the
+ * database (routing_v2_model_stop_events). Carrier STOP, DNC and human-confirmed
+ * suppressions are refused there and stay in force.
+ */
+export async function liftModelStopSuppression(suppressionId: string): Promise<Result<{ status: "lifted" | "already_lifted" }>> {
+  const auth = await authorize();
+  if (!auth.ok) return auth;
+  const id = String(suppressionId ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) {
+    return err({ code: "VALIDATION", message: "Invalid suppression id" });
+  }
+  try {
+    const supabase = await createClient();
+    const result = await liftModelStopSuppressionCore(supabase, id);
+    if (!result.ok) return err({ code: result.code, message: result.message });
+    revalidatePath("/messages-v2");
+    return { ok: true, data: { status: result.status } };
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_lift_model_stop" }, extra: { suppressionId: id } });
+    return err({ code: "FAILED", message: "Could not undo. Try again." });
+  }
+}
+
+/** The still-liftable `model_stop` suppression written for an inbound message, or null. */
+export async function findModelStopSuppression(inboundMessageId: string): Promise<string | null> {
+  const auth = await authorize();
+  if (!auth.ok) return null;
+  const id = String(inboundMessageId ?? "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  try {
+    const supabase = await createClient();
+    const loose = supabase as unknown as LooseSupabase;
+    const { data, error } = await loose
+      .from("routing_v2_model_stop_events")
+      .select("suppression_id")
+      .eq("inbound_message_id", id)
+      .eq("org_id", auth.data.orgId)
+      .eq("action", "suppressed")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const suppressionId = (data as { suppression_id?: string | null } | null)?.suppression_id ?? null;
+    if (!suppressionId) return null;
+    const { data: row, error: rowError } = await loose
+      .from("sms_phone_suppressions")
+      .select("id")
+      .eq("id", suppressionId)
+      .eq("org_id", auth.data.orgId)
+      .eq("source", "model_stop")
+      .maybeSingle();
+    if (rowError) throw new Error(rowError.message);
+    return (row as { id?: string } | null)?.id ?? null;
+  } catch (e) {
+    reportError(e, { tags: { surface: "messages_v2_find_model_stop" }, extra: { inboundMessageId: id } });
     return null;
   }
 }

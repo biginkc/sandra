@@ -13,9 +13,18 @@ import {
   retrySequenceStep,
 } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
+import {
+  hasVoicemailFields,
+  isValidVoicemailDropStep,
+  voicemailStepIsSpoken,
+  VOICEMAIL_VOICE_REQUIRED_MESSAGE,
+  voicemailScriptNeedsVoice,
+} from "@/lib/sequences/voicemail-drop-step-config";
 import { DRIP_BUCKET_LABELS } from "@/lib/sequences/drip-status";
 import { NEEDS_PERSON_PAGE_SIZE } from "./overview-model";
-import { enrollmentReason, previewFirstSend, startFollowUpDrip, type DripResult } from "@/lib/sequences/start-drip";
+import { loadDripChoices, type DripChoice } from "@/lib/sequences/drip-choices";
+import { timeServerAction } from "@/lib/perf/server-action-log";
+import { enrollmentReason, startFollowUpDrip, type DripResult } from "@/lib/sequences/start-drip";
 
 import { requireSequenceAdmin } from "./admin";
 
@@ -35,7 +44,11 @@ export type SequenceRow = {
   couldnt_send?: number;
   stopped?: number;
   last_sent?: string | null;
+  /** Routing v2 drip: managed by migrations only (no edit / archive / open-close controls). */
+  managed?: boolean;
 };
+
+export type SequenceActionType = "send_sms" | "change_status" | "send_voicemail_drop";
 
 export type SequenceWithSteps = {
   id: string;
@@ -44,19 +57,53 @@ export type SequenceWithSteps = {
   active: boolean;
   append_opt_out: boolean;
   archived_at: string | null;
+  /** Routing v2 drip: managed by migrations only. */
+  managed?: boolean;
   steps: Array<{
     id: string;
     step_index: number;
     delay_after_previous_minutes: number;
-    action_type: "send_sms" | "change_status";
+    action_type: SequenceActionType;
     template_body: string | null;
     template_id: string | null;
     template_category: string | null;
     target_status: string | null;
+    vm_media_id?: string | null;
+    vm_tts_body?: string | null;
+    vm_voice_id?: string | null;
+    vm_phone_line_id?: string | null;
+    vm_template_category?: string | null;
   }>;
 };
 
 export type SequenceStepInput = Omit<SequenceWithSteps["steps"][number], "id"> & { id?: string };
+
+const ROUTING_V2_DRIP_LOCKED_MESSAGE =
+  "This is an automatic reply drip. Its texts and timing can't be edited here.";
+
+/** Ids among `ids` that are routing v2 drips. Never throws (pre-migration / mocks -> none). */
+async function routingV2ManagedIds(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  ids: string[],
+): Promise<Set<string>> {
+  if (!ids.length) return new Set();
+  try {
+    const res = await (supabase as unknown as {
+      from: (t: string) => { select: (c: string) => { in: (k: string, v: string[]) => { not: (k: string, op: string, v: null) => Promise<{ data: Array<{ id: string }> | null; error: unknown }> } } };
+    }).from("sequences").select("id").in("id", ids).not("routing_v2_key", "is", null);
+    if (res?.error || !Array.isArray(res?.data)) return new Set();
+    return new Set(res.data.map((r) => r.id));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Routing v2 drips (PR-C) are migration-managed; a DB trigger rejects editor writes. */
+function routingV2DripLocked(message: string | undefined) {
+  return /ROUTING_V2_DRIP_LOCKED/.test(message ?? "")
+    ? { ok: false as const, error: { code: "ROUTING_V2_DRIP_LOCKED", message: ROUTING_V2_DRIP_LOCKED_MESSAGE } }
+    : null;
+}
 
 export async function replaceSequenceSteps(input: {
   sequenceId: string;
@@ -65,17 +112,34 @@ export async function replaceSequenceSteps(input: {
   steps: SequenceStepInput[];
 }): Promise<Result<string[]>> {
   const name = input.name.trim();
+  // Script drops are read by a voice: the step's own, else the server default
+  // (DROPCOWBOY_VOICE_ID), saved onto the step because the worker reads only
+  // the step. No voice at all = a clear error instead of a broken step.
+  const defaultVoiceId = process.env.DROPCOWBOY_VOICE_ID?.trim() || null;
+  if (input.steps.some((step) => voicemailStepIsSpoken(step) && voicemailScriptNeedsVoice(step, defaultVoiceId))) {
+    return { ok: false, error: { code: "VALIDATION", message: VOICEMAIL_VOICE_REQUIRED_MESSAGE } };
+  }
+  input = {
+    ...input,
+    steps: input.steps.map((step) =>
+      voicemailStepIsSpoken(step) && !step.vm_voice_id?.trim()
+        ? { ...step, vm_voice_id: defaultVoiceId }
+        : step),
+  };
   if (!name || name.length > 120 || input.steps.length > 100 || input.steps.some((step, index) =>
     step.step_index !== index || !Number.isInteger(step.delay_after_previous_minutes) ||
     step.delay_after_previous_minutes < 0 ||
     (step.action_type === "send_sms" && (
       Number(Boolean(step.template_body?.trim())) + Number(Boolean(step.template_id)) +
-      Number(Boolean(step.template_category?.trim())) !== 1 || Boolean(step.target_status)
+      Number(Boolean(step.template_category?.trim())) !== 1 || Boolean(step.target_status) ||
+      hasVoicemailFields(step)
     )) ||
     (step.action_type === "change_status" && (
       !step.target_status?.trim() || Boolean(step.template_body?.trim()) ||
-      Boolean(step.template_id) || Boolean(step.template_category?.trim())
-    )) || !["send_sms", "change_status"].includes(step.action_type)
+      Boolean(step.template_id) || Boolean(step.template_category?.trim()) || hasVoicemailFields(step)
+    )) ||
+    (step.action_type === "send_voicemail_drop" && !isValidVoicemailDropStep(step)) ||
+    !["send_sms", "change_status", "send_voicemail_drop"].includes(step.action_type)
   )) return { ok: false, error: { code: "VALIDATION", message: "Check the drip name and every step before saving." } };
   try {
     const guard = await requireSequenceAdmin();
@@ -87,7 +151,7 @@ export async function replaceSequenceSteps(input: {
       p_description: input.description,
       p_steps: input.steps,
     });
-    if (error) return { ok: false, error: { code: "STEP_REPLACE_FAILED", message: error.message } };
+    if (error) return routingV2DripLocked(error.message) ?? { ok: false, error: { code: "STEP_REPLACE_FAILED", message: error.message } };
     revalidatePath("/sequences");
     revalidatePath(`/sequences/${input.sequenceId}`);
     revalidatePath(`/sequences/${input.sequenceId}/edit`);
@@ -161,42 +225,10 @@ export async function listSequenceNeedsPersonPage(bucket: NeedsPersonBucket, pag
   }
 }
 
-export type DripChoice = { id: string; name: string; textCount: number; days: number; firstSend: string | null };
+export type { DripChoice };
 
 export async function listDripChoices(): Promise<Result<DripChoice[]>> {
-  try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
-    const { data: sequences, error } = await supabase.from("sequences")
-      .select("id, name, created_by").eq("active", true).is("archived_at", null).order("name");
-    if (error) return { ok: false, error: { code: "SEQ_LIST_FAILED", message: error.message } };
-    const visibleSequences = (sequences ?? []).filter((sequence) =>
-      !process.env.SEQUENCE_CANARY_USER_ID || sequence.created_by !== process.env.SEQUENCE_CANARY_USER_ID);
-    if (!visibleSequences.length) return ok([]);
-    const { data: steps, error: stepError } = await supabase.from("sequence_steps")
-      .select("sequence_id, step_index, delay_after_previous_minutes, action_type")
-      .in("sequence_id", visibleSequences.map((sequence) => sequence.id)).order("step_index");
-    if (stepError) return { ok: false, error: { code: "SEQ_LIST_FAILED", message: stepError.message } };
-    return ok(visibleSequences.flatMap((sequence) => {
-      const own = (steps ?? []).filter((step) => step.sequence_id === sequence.id);
-      if (!own.length || own[0].step_index !== 0) return [];
-      const firstSmsIndex = own.findIndex((step) => step.action_type === "send_sms");
-      return [{
-        id: sequence.id,
-        name: sequence.name,
-        textCount: own.filter((step) => step.action_type === "send_sms").length,
-        days: Math.ceil(own.reduce((sum, step) => sum + step.delay_after_previous_minutes, 0) / 1440),
-        firstSend: firstSmsIndex < 0 ? null : previewFirstSend(
-          own.slice(0, firstSmsIndex + 1).reduce((sum, step) => sum + step.delay_after_previous_minutes, 0),
-          "America/Chicago",
-        ),
-      }];
-    }));
-  } catch (e) {
-    reportError(e, { tags: { surface: "list_drip_choices" } });
-    return errFromUnknown(e, "SEQ_LIST_FAILED");
-  }
+  return timeServerAction("listDripChoices", async () => loadDripChoices(await createClient()));
 }
 
 export async function startDripForLeads(sequenceId: string, propertyIds: string[]): Promise<Result<{ results: DripResult[] }>> {
@@ -224,9 +256,12 @@ export async function listSequences(): Promise<Result<SequenceRow[]>> {
     const orgId = await activeOrgId(supabase, user.id);
     if (!orgId) return ok([]);
     const stats = await supabase.rpc("sequence_overview_stats", { p_org: orgId });
-    if (!stats.error) return ok((stats.data ?? []).filter((row) =>
-      !process.env.SEQUENCE_CANARY_USER_ID || row.created_by !== process.env.SEQUENCE_CANARY_USER_ID)
-      .map((row) => ({
+    if (!stats.error) {
+      const statRows = (stats.data ?? []).filter((row) =>
+        !process.env.SEQUENCE_CANARY_USER_ID || row.created_by !== process.env.SEQUENCE_CANARY_USER_ID);
+      const managedIds = await routingV2ManagedIds(supabase, statRows.map((row) => row.id));
+      return ok(statRows.map((row) => ({
+        managed: managedIds.has(row.id),
         id: row.id, name: row.name, description: row.description,
         active: row.active, append_opt_out: row.append_opt_out,
         archived_at: row.archived_at, created_at: row.created_at,
@@ -236,6 +271,7 @@ export async function listSequences(): Promise<Result<SequenceRow[]>> {
         couldnt_send: row.couldnt_send, stopped: row.stopped,
         last_sent: row.last_sent,
       })));
+    }
     // Deploys can precede the migration; keep the current page available.
     if (stats.error.code !== "PGRST202" && stats.error.code !== "42883") {
       return { ok: false, error: { code: "SEQ_LIST_FAILED", message: stats.error.message } };
@@ -282,6 +318,7 @@ export async function listSequences(): Promise<Result<SequenceRow[]>> {
       enrTally.set(r.sequence_id, (enrTally.get(r.sequence_id) ?? 0) + 1);
     }
 
+    // Fallback path (stats RPC not deployed yet = routing v2 not deployed either): no managed rows.
     return ok(
       visible.map((s) => ({
         id: s.id, name: s.name, description: s.description, active: s.active,
@@ -317,7 +354,7 @@ export async function getSequenceWithSteps(
     const { data: steps, error: stepErr } = await supabase
       .from("sequence_steps")
       .select(
-        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, template_category, target_status",
+        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, template_category, target_status, vm_media_id, vm_tts_body, vm_voice_id, vm_phone_line_id, vm_template_category",
       )
       .eq("sequence_id", sequenceId)
       .order("step_index", { ascending: true });
@@ -327,11 +364,13 @@ export async function getSequenceWithSteps(
         error: { code: "SEQ_GET_FAILED", message: stepErr.message },
       };
     }
+    const managedIds = await routingV2ManagedIds(supabase, [seq.id]);
     return ok({
       ...seq,
+      managed: managedIds.has(seq.id),
       steps: (steps ?? []).map((s) => ({
         ...s,
-        action_type: s.action_type as "send_sms" | "change_status",
+        action_type: s.action_type as SequenceActionType,
       })),
     });
   } catch (e) {
@@ -456,7 +495,7 @@ export async function updateSequence(
       .update(update)
       .eq("id", sequenceId);
     if (error) {
-      return {
+      return routingV2DripLocked(error.message) ?? {
         ok: false,
         error: { code: "SEQ_UPDATE_FAILED", message: error.message },
       };
@@ -489,7 +528,7 @@ export async function archiveSequence(
       })
       .eq("id", sequenceId);
     if (error) {
-      return {
+      return routingV2DripLocked(error.message) ?? {
         ok: false,
         error: { code: "SEQ_ARCHIVE_FAILED", message: error.message },
       };
@@ -513,7 +552,7 @@ export async function restoreSequence(sequenceId: string): Promise<Result<null>>
     const { error } = await supabase.from("sequences")
       .update({ archived_at: null, updated_at: new Date().toISOString() })
       .eq("id", sequenceId);
-    if (error) return { ok: false, error: { code: "SEQ_RESTORE_FAILED", message: error.message } };
+    if (error) return routingV2DripLocked(error.message) ?? { ok: false, error: { code: "SEQ_RESTORE_FAILED", message: error.message } };
     revalidatePath("/sequences");
     return ok(null);
   } catch (error) {

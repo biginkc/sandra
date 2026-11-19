@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { reportError } from "@/lib/errors/report";
 import { renderReviewedReply } from "@/lib/inbox/reply-template";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { rapidOfferBlocksSend } from "@/lib/templates/rapid-offer";
 import type { Database } from "@/lib/supabase/types";
 import {
   loadOrgThresholdMap,
@@ -51,8 +52,21 @@ export const TEMPLATE_REPLY_OUTCOMES: ReadonlySet<JevOutcome> = new Set([
  */
 export const HOSTILE_REPLY_KEY = "hostile" as const;
 
+/**
+ * Mapping key for the "where did you get my number" reply. Not a Jev outcome:
+ * Jev's `asked_how_number_obtained` answer is a separate question, so the
+ * mapping has its own key. The reply is only ever the approved library text
+ * the owner mapped here; it is sent in place of (never in addition to) the
+ * outcome's own template, and only while the outcome itself is one that
+ * already allows an automatic reply.
+ */
+export const NUMBER_SOURCE_REPLY_KEY = "number_source" as const;
+
 /** Every key `auto_reply_templates.outcome` may hold. */
-export type TemplateReplyKey = JevOutcome | typeof HOSTILE_REPLY_KEY;
+export type TemplateReplyKey = JevOutcome | typeof HOSTILE_REPLY_KEY | typeof NUMBER_SOURCE_REPLY_KEY;
+
+/** The keys that stand for an outcome (everything but the number-source mapping key). */
+export type TemplateOutcomeKey = Exclude<TemplateReplyKey, typeof NUMBER_SOURCE_REPLY_KEY>;
 
 export type TemplateRow = {
   content: string;
@@ -129,7 +143,11 @@ export type TemplateReplyResolution =
       templateId: string;
       mappingId: string;
       body: string;
-      outcome: TemplateReplyKey;
+      /** The library text the body was rendered from: the send-time approval re-check compares THIS (not the rendered body) to `approved_content`. */
+      source?: string;
+      outcome: TemplateOutcomeKey;
+      /** The mapping key that supplied the template (the outcome itself unless a mapping key was passed). */
+      key?: TemplateReplyKey;
     }
   | { kind: "none"; reason: TemplateSkipReason };
 
@@ -147,7 +165,13 @@ export async function resolveApprovedTemplateReply(
     orgId: string;
     propertyId: string;
     contactId: string;
-    outcome: TemplateReplyKey;
+    outcome: TemplateOutcomeKey;
+    /**
+     * Which mapping to read. Defaults to the outcome. `number_source` still
+     * runs every outcome check (templatable outcome, no human follow-up, label
+     * switch, cutoff) and only swaps which mapped template is sent.
+     */
+    mappingKey?: TemplateReplyKey;
     outcomeConfidence: number | null;
     /**
      * Jev's human-follow-up answer for this message. REQUIRED (no default):
@@ -158,10 +182,27 @@ export async function resolveApprovedTemplateReply(
      */
     escalationReason: JevEscalationReason | null;
     replyIntent?: JevReplyIntent | null;
+    /**
+     * Messages v2 PR 3: the answer was decided by Jarrad's nine questions (60%
+     * cutoff already applied, no escalation-reason question exists). The label's
+     * own automation switch is still honoured (fail closed); the old eight-answer
+     * cutoff and escalation-reason checks do not apply.
+     */
+    decidedBy?: "nine_questions";
     /** Test seam: defaults to the live per-org thresholds. */
     thresholds?: ThresholdMap;
   },
 ): Promise<TemplateReplyResolution> {
+  // The number-source reply answers only a nurture / not-interested message.
+  // A wrong contact, a hostile one, a stop request, a new lead or anything
+  // unclear never gets it (a person looks instead).
+  if (
+    args.mappingKey === NUMBER_SOURCE_REPLY_KEY &&
+    args.outcome !== "nurture" &&
+    args.outcome !== "not_interested"
+  ) {
+    return { kind: "none", reason: "outcome_not_templatable" };
+  }
   const hostile = args.outcome === HOSTILE_REPLY_KEY;
   if (!hostile && !TEMPLATE_REPLY_OUTCOMES.has(args.outcome as JevOutcome)) {
     return { kind: "none", reason: "outcome_not_templatable" };
@@ -170,7 +211,13 @@ export async function resolveApprovedTemplateReply(
   // Hostile is decided by wording in code, not by Jev: no follow-up answer,
   // confidence or label switch applies. Everything else (approved text, active
   // mapping, send gates) is identical.
-  if (!hostile) {
+  if (!hostile && args.decidedBy === "nine_questions") {
+    const thresholds = args.thresholds ?? (await loadOrgThresholdMap(supabase, args.orgId));
+    const configured = thresholds[args.outcome as keyof ThresholdMap];
+    if (!configured || configured.automationEnabled !== true) {
+      return { kind: "none", reason: "automation_disabled" };
+    }
+  } else if (!hostile) {
     if (args.escalationReason !== "not_applicable") {
       return { kind: "none", reason: "human_follow_up" };
     }
@@ -197,7 +244,7 @@ export async function resolveApprovedTemplateReply(
       "id, template_id, reply_intent, priority, sms_templates(content, approved_for_auto_send, approved_content, deleted_at)",
     )
     .eq("org_id", args.orgId)
-    .eq("outcome", args.outcome)
+    .eq("outcome", args.mappingKey ?? args.outcome)
     .eq("active", true);
   if (error || !data) {
     reportError(new Error(error?.message ?? "auto reply template lookup returned no data"), {
@@ -224,6 +271,9 @@ export async function resolveApprovedTemplateReply(
       propertyId: args.propertyId,
       contactId: args.contactId,
     });
+    if (rapidOfferBlocksSend(candidate.template.content, vars)) {
+      return { kind: "none", reason: "render_failed" };
+    }
     // Strict renderer: a missing variable without a fallback throws instead of
     // sending a message with a hole in it.
     const body = renderReviewedReply(candidate.template.content, vars);
@@ -232,9 +282,35 @@ export async function resolveApprovedTemplateReply(
       templateId: candidate.templateId,
       mappingId: candidate.mappingId,
       body,
+      source: candidate.template.content,
       outcome: args.outcome,
+      key: args.mappingKey ?? args.outcome,
     };
   } catch {
     return { kind: "none", reason: "render_failed" };
   }
+}
+
+/**
+ * Cheap pre-check for the identity interceptor: does this org have an active,
+ * sendable (approved, unedited, not deleted) `number_source` mapping? Lets the
+ * interceptor skip the extra classifier call entirely when there is nothing
+ * that could be sent. Fails closed (false) on any lookup error.
+ */
+export async function hasSendableNumberSourceTemplate(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("auto_reply_templates")
+    .select(
+      "id, template_id, reply_intent, priority, sms_templates(content, approved_for_auto_send, approved_content, deleted_at)",
+    )
+    .eq("org_id", orgId)
+    .eq("outcome", NUMBER_SOURCE_REPLY_KEY)
+    .eq("active", true);
+  if (error || !data) return false;
+  return (data as unknown as MappingRow[]).some((row) =>
+    isTemplateSendable(Array.isArray(row.sms_templates) ? (row.sms_templates[0] ?? null) : row.sms_templates),
+  );
 }

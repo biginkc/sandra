@@ -1,3 +1,4 @@
+import { parseDealMachineContact } from "./dealmachine-contact";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
@@ -633,10 +634,10 @@ async function ingestRow(
   // authoritative stored DNC lock. A re-import need not repeat the DNC flag.
   let homeownerContactId: string | null = null;
   let homeownerDetails: HomeownerDetailsInsert | null = null;
-  // Assigns owns a multi-contact relation. Do not silently nominate Contact 1
+  // Source adapters own a multi-contact relation. Do not silently nominate Contact 1
   // as the homeowner: the user must select an intended recipient before a
   // future launch. Every block is persisted through the atomic RPC below.
-  if (hasHomeownerFields(n) && !n.assigns_contact_blocks) {
+  if (hasHomeownerFields(n) && !n.assigns_contact_blocks && !n.dealmachine_source_row) {
     // A DNC-flagged row must be able to match an existing contact via a
     // phone that compactTypedPhones() just dropped (a DNC label normalizes
     // to 'unknown' and is never written to a slot) — otherwise a row whose
@@ -802,7 +803,7 @@ async function ingestRow(
     if (!outcome.complianceLocked && homeownerDetails) {
       await upsertHomeownerDetails(supabase, homeownerDetails);
     }
-    const assigns = await persistAssignsContactBlocks(
+    const assigns = await persistSourceContactBlocks(
       supabase,
       n,
       outcome.propertyId,
@@ -874,7 +875,7 @@ async function ingestRow(
   if (!outcome.complianceLocked && homeownerDetails) {
     await upsertHomeownerDetails(supabase, homeownerDetails);
   }
-  const assigns = await persistAssignsContactBlocks(
+  const assigns = await persistSourceContactBlocks(
     supabase,
     n,
     outcome.propertyId,
@@ -903,16 +904,29 @@ function splitAssignsName(name: string | undefined): {
 
 /**
  * Preserve every Assigns contact block. The source's DNC and litigation
- * columns remain vendor metadata: this adapter never turns them into an app
- * suppression flag or removes a contact, per the operator's instruction.
+ * columns remain vendor metadata for Assigns. DealMachine DNC flags also
+ * ratchet contact suppression while retaining every source row.
  */
-async function persistAssignsContactBlocks(
+async function persistSourceContactBlocks(
   supabase: SupabaseClient<Database>,
   n: Readonly<Record<string, unknown>>,
   propertyId: string,
   orgId: string,
   jobId: string,
 ): Promise<{ droppedUnlabeledPhones: number }> {
+  const person = parseDealMachineContact(n.dealmachine_source_row);
+  if (person) {
+    const { data: contactId, error } = await supabase.rpc("upsert_dealmachine_property_contact", {
+      p_property_id: propertyId, p_org_id: orgId, p_source_identity: person.sourceId,
+      p_source_position: 1, p_source_attributes: person.row as Json, p_contact: person.contact as Json,
+    });
+    if (error || !contactId) throw new Error(`DealMachine contact persistence failed: ${error?.message ?? "missing contact"}`);
+    const checkpoint = await supabase.from("csv_import_contact_outcomes").upsert({
+      job_id: jobId, property_id: propertyId, contact_id: contactId, org_id: orgId, source_identity: `dealmachine:${person.sourceId}`,
+    }, { onConflict: "job_id,property_id,contact_id,source_identity", ignoreDuplicates: true });
+    if (checkpoint.error) throw new Error(`DealMachine contact checkpoint: ${checkpoint.error.message}`);
+    return { droppedUnlabeledPhones: person.phones.filter((p) => p.value && p.type === "unknown").length };
+  }
   const blocks = parseAssignsContactBlocks(n.assigns_contact_blocks);
   let droppedUnlabeledPhones = 0;
   for (const block of blocks) {

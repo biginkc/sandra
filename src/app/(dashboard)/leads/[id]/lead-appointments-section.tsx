@@ -1,32 +1,46 @@
 "use client";
 
+import { useEffect, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+
 import {
   AppointmentOutcomeRow,
   AppointmentUpcomingActions,
 } from "@/components/appointments/appointment-outcome-row";
+import { TaskActionsRow } from "@/app/(dashboard)/dashboard/_components/task-actions-row";
+import { Button } from "@/components/ui/button";
+import {
+  canActOnLeadAppointment,
+  groupLeadAppointments,
+  type LeadAppointmentCursor,
+  type LeadAppointmentRow,
+} from "@/lib/leads/lead-appointments";
 import { formatTimeRange } from "@/lib/time/format-time-range";
 
-export type LeadAppointmentRow = {
-  id: string;
-  title: string;
-  /** ISO timestamptz */
-  due_at: string;
-  end_at: string | null;
-  assignee_id: string;
+import {
+  loadLeadAppointmentHistory,
+  type LeadAppointmentHistoryResult,
+} from "./lead-appointments-actions";
+
+export type { LeadAppointmentRow };
+
+export type LeadAppointmentHistoryPage = {
+  rows: LeadAppointmentRow[];
+  hasMore: boolean;
+  cursor: LeadAppointmentCursor | null;
 };
 
 type Props = {
+  propertyId: string;
+  /** Every open or snoozed appointment/callback for the lead. */
   appointments: LeadAppointmentRow[];
+  /** First page of completed / cancelled appointments and callbacks. */
+  history: LeadAppointmentHistoryPage;
+  viewerId: string | null;
+  viewerIsOwner: boolean;
   /** Request-captured instant from the lead page; stable across hydration. */
   nowMs: number;
-  /** Zone to render due/end times in — the viewer's own saved timezone
-   *  (same `user_integration_prefs.timezone` source TasksPanel's
-   *  `fetchMyTasks` reads, loaded via `loadIntegrationPrefs` and passed
-   *  down by the lead page). Without an explicit `timeZone`,
-   *  `Intl.DateTimeFormat` falls back to the runtime's device/OS zone,
-   *  which silently disagrees with the viewer's saved preference whenever
-   *  they differ (e.g. a rep traveling, or a server render in a different
-   *  region than the viewer). */
+  /** The viewer's saved timezone (user_integration_prefs.timezone). */
   timezone: string;
 };
 
@@ -40,70 +54,204 @@ function formatDatedTimeRange(
     month: "short",
     day: "numeric",
   });
-  const start = new Date(dueAt);
-  return `${dateFmt.format(start)}, ${formatTimeRange(dueAt, endAt, timeZone)}`;
+  return `${dateFmt.format(new Date(dueAt))}, ${formatTimeRange(dueAt, endAt, timeZone)}`;
+}
+
+function statusLabel(row: LeadAppointmentRow) {
+  if (row.status === "snoozed") return "Snoozed";
+  if (row.status === "cancelled") return "Cancelled";
+  if (row.status === "completed") {
+    if (row.outcome === "held") return "Held";
+    if (row.outcome === "no_show") return "No-show";
+    return "Completed";
+  }
+  return null;
 }
 
 /**
- * Lead-detail "Appointments" section — the lead's own open appointments
- * (booked via BookAppointmentPopover above), each with the same outcome
- * ("How'd it go?") / reschedule / cancel controls as the dashboard's
- * TasksPanel: past-due gets the full outcome row, not-yet-due gets the
- * compact overflow. Each appointment keeps its own assignee (a lead's
- * appointments aren't necessarily all owned by the viewer), so the
- * assignee id comes from the row, not the session user.
+ * Lead-detail "Appointments" section: every appointment and callback task
+ * for the lead, grouped Upcoming / Past due / History, with the same
+ * lifecycle controls and assignee-or-owner rule as the My Leads detail panel.
+ * Appointments get Held / No-show / Reschedule / Cancel; callbacks get
+ * Done / Snooze. Each task keeps its own assignee, so the assignee comes
+ * from the row, not the session user.
  */
 export function LeadAppointmentsSection({
+  propertyId,
   appointments,
+  history,
+  viewerId,
+  viewerIsOwner,
   timezone,
   nowMs,
 }: Props) {
-  if (appointments.length === 0) {
+  const router = useRouter();
+  const { upcoming, pastDue } = groupLeadAppointments(appointments, nowMs);
+  const emptyExtra: LeadAppointmentHistoryPage = { rows: [], hasMore: false, cursor: null };
+  const [extra, setExtra] = useState<LeadAppointmentHistoryPage>(emptyExtra);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+  // A server refresh (after Held / Cancel / Done / Snooze) shifts every page
+  // boundary. Drop appended pages and ignore any in-flight load, then resume
+  // from the refreshed first page's cursor.
+  const [baseHistory, setBaseHistory] = useState(history);
+  const historyRef = useRef(history);
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+  if (baseHistory !== history) {
+    setBaseHistory(history);
+    setExtra(emptyExtra);
+    setError(null);
+  }
+
+  const seen = new Set<string>();
+  const historyRows = [...history.rows, ...extra.rows].filter((row) => {
+    if (seen.has(row.id)) return false;
+    seen.add(row.id);
+    return true;
+  });
+
+  // Until a page has been appended, page from the server's first page so a
+  // refresh after Held / Cancel / Done never pages from a stale cursor.
+  const paging =
+    extra.rows.length === 0
+      ? { hasMore: history.hasMore, cursor: history.cursor }
+      : { hasMore: extra.hasMore, cursor: extra.cursor };
+
+  function loadMore() {
+    if (!paging.cursor) return;
+    const cursor = paging.cursor;
+    const base = history;
+    startTransition(async () => {
+      let result: LeadAppointmentHistoryResult;
+      try {
+        result = await loadLeadAppointmentHistory(propertyId, cursor);
+      } catch {
+        result = { ok: false, message: "Appointment history could not be loaded. Retry." };
+      }
+      if (base !== historyRef.current) return;
+      if (!result.ok) {
+        setError(result.message);
+        return;
+      }
+      setError(null);
+      setExtra((previous) => ({
+        rows: [...previous.rows, ...result.rows],
+        hasMore: result.hasMore,
+        cursor: result.cursor,
+      }));
+    });
+  }
+
+  if (appointments.length === 0 && historyRows.length === 0) {
     return (
       <div
         className="text-muted-foreground px-3 py-2 text-sm"
         data-testid="lead-appointments-empty"
       >
-        No open appointments
+        No appointments or callbacks
       </div>
     );
   }
 
-  return (
-    <ul
-      className="divide-border divide-y"
-      data-testid="lead-appointments-section"
-    >
-      {appointments.map((appt) => {
-        const isPastDue = new Date(appt.due_at).getTime() < nowMs;
-        return (
-          <li
-            key={appt.id}
-            className="flex flex-col items-stretch gap-3 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
-            data-testid={`lead-appointment-${appt.id}`}
-          >
-            <div className="min-w-0 flex-1">
-              <div className="text-foreground truncate text-sm font-bold">
-                {appt.title}
-              </div>
-              <div className="text-muted-foreground truncate text-xs font-medium">
-                {formatDatedTimeRange(appt.due_at, appt.end_at, timezone)}
-              </div>
-            </div>
-            {isPastDue ? (
-              <AppointmentOutcomeRow
-                taskId={appt.id}
-                assigneeId={appt.assignee_id}
-              />
-            ) : (
-              <AppointmentUpcomingActions
-                taskId={appt.id}
-                assigneeId={appt.assignee_id}
-              />
+  const renderRow = (row: LeadAppointmentRow, past: boolean) => {
+    const label = statusLabel(row);
+    const canAct = canActOnLeadAppointment(row, viewerId, viewerIsOwner);
+    return (
+      <li
+        key={row.id}
+        className="flex flex-col items-stretch gap-3 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
+        data-testid={`lead-appointment-${row.id}`}
+        data-task-type={row.type}
+        data-task-status={row.status}
+      >
+        <div className="min-w-0 flex-1">
+          <div className="text-foreground truncate text-sm font-bold">
+            {row.title}
+            {row.type !== "appointment" && (
+              <span className="text-muted-foreground ml-2 text-xs font-medium">
+                {row.type === "callback" ? "Callback" : "Follow-up"}
+              </span>
             )}
-          </li>
-        );
-      })}
-    </ul>
+          </div>
+          <div className="text-muted-foreground truncate text-xs font-medium">
+            {formatDatedTimeRange(row.due_at, row.end_at, timezone)}
+            {label && <> · {label}</>}
+          </div>
+        </div>
+        {canAct &&
+          row.type !== "follow_up" &&
+          (row.type === "callback" ? (
+            <TaskActionsRow taskId={row.id} onChanged={() => router.refresh()} />
+          ) : past ? (
+            <AppointmentOutcomeRow
+              taskId={row.id}
+              assigneeId={row.assignee_id}
+              onChanged={() => router.refresh()}
+            />
+          ) : (
+            <AppointmentUpcomingActions
+              taskId={row.id}
+              assigneeId={row.assignee_id}
+              onChanged={() => router.refresh()}
+            />
+          ))}
+      </li>
+    );
+  };
+
+  const groups: Array<{
+    key: string;
+    title: string;
+    rows: LeadAppointmentRow[];
+    past: boolean;
+  }> = [
+    { key: "upcoming", title: "Upcoming", rows: upcoming, past: false },
+    { key: "past-due", title: "Past due", rows: pastDue, past: true },
+    { key: "history", title: "History", rows: historyRows, past: true },
+  ];
+
+  return (
+    <div data-testid="lead-appointments-section">
+      {groups
+        .filter((group) => group.rows.length > 0)
+        .map((group) => (
+          <section
+            key={group.key}
+            data-testid={`lead-appointments-${group.key}`}
+            aria-label={group.title}
+          >
+            <h3 className="text-muted-foreground px-3 pt-2.5 text-[10px] font-extrabold tracking-[0.08em] uppercase">
+              {group.title} · {group.rows.length}
+            </h3>
+            <ul className="divide-border divide-y">
+              {group.rows.map((row) =>
+                renderRow(row, group.key === "past-due"),
+              )}
+            </ul>
+            {group.key === "history" && (paging.hasMore || error) && (
+              <div className="space-y-1.5 px-3 py-2">
+                {paging.hasMore && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    disabled={pending}
+                    onClick={loadMore}
+                  >
+                    {pending ? "Loading…" : "Load more history"}
+                  </Button>
+                )}
+                {error && (
+                  <p className="text-destructive text-xs" role="alert">
+                    {error}
+                  </p>
+                )}
+              </div>
+            )}
+          </section>
+        ))}
+    </div>
   );
 }

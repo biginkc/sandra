@@ -19,7 +19,10 @@ export type LeadMediaPresentation =
   | {
       kind: "flat";
       reason:
-        "missing-static-key" | "missing-signing-secret" | "missing-location";
+        | "missing-static-key"
+        | "missing-signing-secret"
+        | "missing-location"
+        | "resolver-error";
     };
 
 export type LeadMediaImages = {

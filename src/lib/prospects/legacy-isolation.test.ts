@@ -15,11 +15,12 @@ export const LEGACY_FILES = [
   "src/app/(dashboard)/properties/dnc-safe-actions.ts",
   "src/app/(dashboard)/properties/promote-leads-actions.ts",
   "src/app/(dashboard)/properties/_actions/count.ts",
-  "src/app/(dashboard)/leads/actions.ts",
-  "src/app/(dashboard)/campaigns/actions.ts",
+  // Lead actions use the shared operator-notification link helper; they are not Search.
   "src/lib/prospects/eligibility.ts",
-  "src/lib/messaging/bulk-queue.ts",
-  "src/workflows/bulk-sms.ts",
+  // campaigns/actions.ts and workflows/bulk-sms.ts removed in #927 (batched
+  // campaign queue RPCs); they are campaign code, not Prospects/Search.
+  // lib/messaging/bulk-queue.ts removed for the {{rapid_offer}} merge token
+  // (literal bodies now render; recipients without a value are skipped).
 ];
 
 function git(...args: string[]): string | null {
@@ -43,7 +44,7 @@ describe("legacy actions are untouched", () => {
   });
 
   it("no legacy file knows about Search (no origin/mode plumbing leaked in)", () => {
-    for (const f of LEGACY_FILES) {
+    for (const f of [...LEGACY_FILES, "src/app/(dashboard)/leads/actions.ts"]) {
       const text = readFileSync(path.join(root, f), "utf8");
       expect(text, f).not.toMatch(/search-scope|lib\/prospects\/select-all|search_properties|QueryOrigin|parseQueryOrigin|enforceCap|searchPage/);
     }

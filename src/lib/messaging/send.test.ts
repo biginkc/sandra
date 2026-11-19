@@ -4,6 +4,8 @@ import { ProviderError } from "@/lib/errors/classes";
 
 vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
 const adminRpc = vi.hoisted(() => vi.fn());
+const takeover = vi.hoisted(() => ({ pause: vi.fn(async (..._a: unknown[]) => ({ paused: 0 })) }));
+vi.mock("@/lib/sequences/hot-lead-takeover", () => ({ pauseHotBookAppointmentOnTakeover: takeover.pause }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({ rpc: adminRpc }),
 }));
@@ -11,6 +13,14 @@ vi.mock("@/lib/supabase/admin", () => ({
 // Mock every side-dependency sendSmsToContact touches *before* the fresh
 // automated-suppression re-check, so the test can drive the pipeline up to
 // that exact boundary with a minimal, deterministic fake Supabase client.
+const allowlist = vi.hoisted(() => ({ check: vi.fn() }));
+vi.mock("./send-allowlist", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./send-allowlist")>();
+  // The guard's own rules are covered in send-allowlist.test.ts (this file's fake database has
+  // no test tag data). Allowed by default; a test overrides one call to simulate a refusal.
+  allowlist.check.mockImplementation(async () => ({ allowed: true }));
+  return { ...real, checkSendAllowed: allowlist.check };
+});
 vi.mock("./registry", () => ({
   getMessagingProvider: vi.fn(),
 }));
@@ -32,6 +42,7 @@ vi.mock("@/lib/messages/threading", () => ({
 }));
 
 import { releaseQueuedMessage, sendSmsToContact } from "./send";
+import { HOSTILE_NEEDS_CONFIRM_REASON, OPTOUT_PHRASE_NEEDS_CONFIRM_REASON } from "@/lib/ai-responder/hostile";
 import { getMessagingProvider } from "./registry";
 import { getConsentState, getConsentStateStrict } from "./consent";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
@@ -119,6 +130,7 @@ const PROPERTY_ROW = {
 };
 
 beforeEach(() => {
+  takeover.pause.mockClear();
   vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
   vi.mocked(getConsentState).mockResolvedValue("can_send_marketing");
   vi.mocked(getConsentStateStrict).mockResolvedValue({ ok: true, state: "can_send_marketing" });
@@ -156,7 +168,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(provider.sendSms).not.toHaveBeenCalled();
@@ -191,7 +203,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(provider.sendSms).not.toHaveBeenCalled();
@@ -226,7 +238,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(provider.sendSms).not.toHaveBeenCalled();
@@ -251,7 +263,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
     expect(provider.sendSms).not.toHaveBeenCalled();
     expect(outcome.status).toBe("blocked_fresh_state_unavailable");
@@ -282,7 +294,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
     expect(provider.sendSms).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", messageId: "msg-1" });
@@ -308,11 +320,55 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(provider.sendSms).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ status: "sent", messageId: "msg-2" });
+    // A person's manual text is a takeover: the auto-enrolled Book appointment drip stops.
+    expect(takeover.pause).toHaveBeenCalledWith(expect.objectContaining({ propertyIds: [PROPERTY_ID] }));
+  });
+
+  const sentScript = () => ({
+    contacts: [{ data: CONTACT_ROW, error: null }],
+    properties: [{ data: PROPERTY_ROW, error: null }],
+    messages: [
+      { data: { id: "msg-2" }, error: null },
+      { data: { id: "msg-2" }, error: null },
+    ],
+    webhook_events: [{ data: [], error: null }],
+  });
+
+  it("takeover audit: the person is the actor when the caller passes one, else the system", async () => {
+    vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
+    await sendSmsToContact(fakeSupabase(sentScript()), { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", takeoverActorId: "user-7" });
+    expect(takeover.pause).toHaveBeenLastCalledWith({ propertyIds: [PROPERTY_ID], actor: { actorType: "user", actorId: "user-7" } });
+    await sendSmsToContact(fakeSupabase(sentScript()), { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145" });
+    expect(takeover.pause).toHaveBeenLastCalledWith({ propertyIds: [PROPERTY_ID], actor: { actorType: "system" } });
+  });
+
+  it("a scheduled seller appointment reminder is not a takeover", async () => {
+    vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
+    const outcome = await sendSmsToContact(fakeSupabase(sentScript()), {
+      origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
+      metadata: { kind: "seller_appointment_reminder", reminderId: "r1", taskId: "t1" },
+    });
+    expect(outcome).toMatchObject({ status: "sent" });
+    expect(takeover.pause).not.toHaveBeenCalled();
+  });
+
+  it("an automated send never pauses the Book appointment drip", async () => {
+    vi.mocked(getMessagingProvider).mockReturnValue(fakeProvider());
+    const script = sentScript();
+    const outcome = await sendSmsToContact(fakeSupabase({
+      ...script,
+      contacts: [...script.contacts, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+      properties: [...script.properties, { data: PROPERTY_ROW, error: null }],
+    }), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
+    });
+    expect(outcome).toMatchObject({ status: "sent" });
+    expect(takeover.pause).not.toHaveBeenCalled();
   });
 });
 
@@ -353,7 +409,7 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
     contactId: CONTACT_ID,
     propertyId: PROPERTY_ID,
     body: "hello",
-    from: "+18165551234",
+    from: "+18165550145",
     metadata: { generated_by: "ai_responder_v1", inbound_message_id: "inbound-1" },
   };
 
@@ -433,6 +489,33 @@ describe("sendSmsToContact — beforeProviderSubmit fence", () => {
     expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true });
   });
 
+  it("§5.4: a confirmed non-owned refusal is terminal (refusal flag), never reaches the hook or the provider", async () => {
+    const { provider, supabase, updates } = scripted();
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "refused_non_owned" });
+    const hook = vi.fn().mockResolvedValue(true);
+    const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: hook });
+    expect(hook).not.toHaveBeenCalled();
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f", retired: true, refusal: "test_send_refused" });
+    expect(updates[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("§5.4: an unreadable test tag is a transient read failure (blocked_fresh_state_unavailable), never a refusal", async () => {
+    const { provider, supabase } = scripted();
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "taint_lookup_failed" });
+    const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: vi.fn().mockResolvedValue(true) });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_fresh_state_unavailable", messageId: "msg-f", error: "test_tag_unreadable" });
+  });
+
+  it.each(["automated", "manual"] as const)("§5.4: a %s (drip / bulk / rep) send with an unreadable test tag gets the same retryable status", async (origin) => {
+    const { provider, supabase } = scripted();
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "taint_lookup_failed" });
+    const outcome = await sendSmsToContact(supabase, { origin, contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145" });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", error: "test_tag_unreadable" });
+  });
+
   it("a hook that throws is a refusal", async () => {
     const { provider, supabase } = scripted();
     const outcome = await sendSmsToContact(supabase, {
@@ -491,13 +574,15 @@ describe("releaseQueuedMessage — claimed payload", () => {
       error: 'Opening SMS must identify the sender as "Mel with BMH".',
     });
     expect(provider.sendSms).not.toHaveBeenCalled();
+    // Nothing was sent, so nothing was taken over.
+    expect(takeover.pause).not.toHaveBeenCalled();
   });
 
   it("checks the BMH phone pair before an unmarked first send", async () => {
     const provider = {
       ...fakeProvider(),
       providerId: "sendillo",
-      getDefaultFromNumber: () => "+18165551234",
+      getDefaultFromNumber: () => "+18165550145",
     };
     vi.mocked(getMessagingProvider).mockReturnValue(provider);
     vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
@@ -546,7 +631,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Would you consider a cash offer?",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -582,7 +667,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Just checking whether you had a chance to consider it.",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toMatchObject({ status: "sent", messageId: "message-follow-up" });
@@ -610,7 +695,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Would you consider a cash offer?",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -639,7 +724,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
             contact_id: CONTACT_ID,
             property_id: PROPERTY_ID,
             body: "Would you consider a cash offer?",
-            from_address: "+18165551234",
+            from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1,
             scheduled_for: null,
             metadata: { sendOrigin: "automated" },
@@ -683,7 +768,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Would you consider a cash offer?",
-      from: "+18165551234",
+      from: "+18165550145",
       queueOnly: true,
     });
 
@@ -711,7 +796,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
             contact_id: CONTACT_ID,
             property_id: PROPERTY_ID,
             body: firstBody,
-            from_address: "+18165551234",
+            from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1,
             scheduled_for: null,
             metadata: { sendOrigin: "manual", openingIdentityRequired: true },
@@ -720,6 +805,8 @@ describe("releaseQueuedMessage — claimed payload", () => {
         },
         { data: { id: "queued-1", body: claimedBody }, error: null },
         { data: { id: "queued-1" }, error: null },
+        // takeover hook's read-back of the released row
+        { data: { property_id: PROPERTY_ID, metadata: { sendOrigin: "manual" } }, error: null },
       ],
       contacts: [{ data: CONTACT_ROW, error: null }],
       properties: [{ data: PROPERTY_ROW, error: null }],
@@ -731,8 +818,101 @@ describe("releaseQueuedMessage — claimed payload", () => {
     expect(provider.sendSms).toHaveBeenCalledWith({
       to: CONTACT_ROW.phone_1,
       body: claimedBody,
-      from: "+18165551234",
+      from: "+18165550145",
     });
+    // A person's queued text finally going out is a takeover: the Book appointment drip stops.
+    expect(takeover.pause).toHaveBeenCalledWith(expect.objectContaining({ propertyIds: [PROPERTY_ID] }));
+  });
+
+  it("§5.4: a queued row whose test tag cannot be read goes back in the queue (later), never failed or sent", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-t", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165550145",
+            to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "manual", openingIdentityRequired: true },
+          },
+          error: null,
+        },
+        { data: { id: "queued-t", body: "Hi there, Mel with BMH here." }, error: null },
+        { data: { id: "queued-t" }, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+    });
+    const updates: Array<Record<string, unknown>> = [];
+    const realFrom = supabase.from;
+    supabase.from = (table: string) => {
+      const builder = realFrom(table);
+      const realUpdate = builder.update;
+      builder.update = (value: Record<string, unknown>) => {
+        if (table === "messages") updates.push(value);
+        return realUpdate(value);
+      };
+      return builder;
+    };
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "taint_lookup_failed" });
+    const before = Date.now();
+    const outcome = await releaseQueuedMessage(supabase, "queued-t");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_fresh_state_unavailable", messageId: "queued-t", error: "test_tag_unreadable" });
+    const requeue = updates.at(-1)!;
+    expect(requeue).toMatchObject({ status: "queued" });
+    expect(Date.parse(String(requeue.scheduled_for))).toBeGreaterThan(before);
+    expect(updates.some((u) => u.status === "failed")).toBe(false);
+  });
+
+  it("§5.4: a queued row refused as non-owned is failed (terminal refusal flag)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-r", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165550145",
+            to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "manual", openingIdentityRequired: true },
+          },
+          error: null,
+        },
+        { data: { id: "queued-r", body: "Hi there, Mel with BMH here." }, error: null },
+        { data: { id: "queued-r" }, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+    });
+    allowlist.check.mockResolvedValueOnce({ allowed: false, why: "refused_non_owned" });
+    const outcome = await releaseQueuedMessage(supabase, "queued-r");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "queued-r", retired: true, refusal: "test_send_refused" });
+  });
+
+  it("a released AUTOMATED queue row is not a takeover", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-9", status: "queued", provider: provider.providerId, org_id: PROPERTY_ROW.org_id, campaign_id: null,
+            contact_id: CONTACT_ID, property_id: PROPERTY_ID, body: "Hi there, Mel with BMH here.", from_address: "+18165550145",
+            to_address: CONTACT_ROW.phone_1, scheduled_for: null, metadata: { sendOrigin: "automated", openingIdentityRequired: true },
+          },
+          error: null,
+        },
+        { data: { id: "queued-9", body: "Hi there, Mel with BMH here." }, error: null },
+        { data: { id: "queued-9" }, error: null },
+        { data: { property_id: PROPERTY_ID, metadata: { sendOrigin: "automated" } }, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }, { data: PROPERTY_ROW, error: null }],
+    });
+    const outcome = await releaseQueuedMessage(supabase, "queued-9");
+    expect(outcome).toMatchObject({ status: "sent" });
+    expect(takeover.pause).not.toHaveBeenCalled();
   });
 
   it("rejects a claimed opener that loses its identity before provider dispatch", async () => {
@@ -750,7 +930,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
             contact_id: CONTACT_ID,
             property_id: PROPERTY_ID,
             body: "Hi there, Mel with BMH here. Previous opener.",
-            from_address: "+18165551234",
+            from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1,
             scheduled_for: null,
             metadata: { sendOrigin: "manual", openingIdentityRequired: true },
@@ -790,7 +970,7 @@ describe("releaseQueuedMessage — claimed payload", () => {
             contact_id: CONTACT_ID,
             property_id: PROPERTY_ID,
             body: "Hi, Mel with BMH here. Previous opener.",
-            from_address: "+18165551234",
+            from_address: "+18165550145",
             to_address: CONTACT_ROW.phone_1,
             scheduled_for: null,
             metadata: { sendOrigin: "manual" },
@@ -843,7 +1023,7 @@ describe("sendSmsToContact — Sendillo organization scope", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -863,7 +1043,7 @@ describe("sendSmsToContact — Sendillo organization scope", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -910,7 +1090,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
     status: "sent",
     external_id: "provider-existing",
     error_message: null,
-    from_address: "+18165551234",
+    from_address: "+18165550145",
     to_address: CONTACT_ROW.phone_1,
     metadata: null,
     ...overrides,
@@ -930,7 +1110,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -951,7 +1131,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -973,7 +1153,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -999,7 +1179,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "edited after response loss",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -1029,7 +1209,7 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "hello",
-      from: "+18165551234",
+      from: "+18165550145",
       idempotencyKey,
     });
 
@@ -1073,7 +1253,7 @@ describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Hi, Mel with BMH here.",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -1106,7 +1286,7 @@ describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
       body: "Hi, Mel with BMH here.",
-      from: "+18165551234",
+      from: "+18165550145",
     });
 
     expect(outcome).toEqual({
@@ -1216,3 +1396,153 @@ describe("sendSmsToContact — service-owned rep SMS retry fence", () => {
   expect(getMessagingProvider).not.toHaveBeenCalled();
   expect(fromSpy).not.toHaveBeenCalled();
  });
+
+const HOSTILE_OPEN = { needs_human_attention: true, last_ai_escalation_reason: `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2` };
+const HOSTILE_CLEARED = { needs_human_attention: false, last_ai_escalation_reason: `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2` };
+const NO_HOLD = { needs_human_attention: false, last_ai_escalation_reason: null };
+const SEQ = { enrollmentId: "enr-1", stepId: "step-1", claimId: "claim-1" };
+
+/** Property reads in order: main lookup, fresh re-check, final dispatch-boundary hold read. */
+function holdSupabase(fresh: Record<string, unknown>, final: Record<string, unknown> = fresh) {
+  return fakeSupabase({
+    contacts: [
+      { data: CONTACT_ROW, error: null },
+      { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+    ],
+    properties: [
+      { data: { ...PROPERTY_ROW, ...fresh }, error: null },
+      { data: { outreach_dispo: null, ...fresh }, error: null },
+      { data: { ...final }, error: null },
+    ],
+    messages: Array.from({ length: 6 }, () => ({ data: { id: "msg-h" }, error: null })),
+    campaigns: Array.from({ length: 4 }, () => ({ data: { status: "active", paused_at: null }, error: null })),
+  });
+}
+
+describe("sendSmsToContact — open stop-texting / hostile hold (Jarrad 2026-11-08)", () => {
+  it.each([
+    ["stop-texting", `${OPTOUT_PHRASE_NEEDS_CONFIRM_REASON}:in-1`],
+    ["hostile", `${HOSTILE_NEEDS_CONFIRM_REASON}:in-2`],
+  ])("blocks a drip/sequence send to an open %s hold", async (_l, reason) => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase({ needs_human_attention: true, last_ai_escalation_reason: reason }), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold", messageId: "msg-h" });
+  });
+
+  it("blocks a sequence send when the hold is committed after the first fresh check (pre-authorization read)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(NO_HOLD, HOSTILE_OPEN), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold" });
+  });
+
+  it("holds a sequence send when the hold read fails, before sequence authorization (fail closed)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const failing = fakeSupabase({
+        contacts: [{ data: CONTACT_ROW, error: null }, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+        properties: [
+          { data: PROPERTY_ROW, error: null },
+          { data: { outreach_dispo: null, ...NO_HOLD }, error: null },
+          { data: null, error: { message: "read timeout" } },
+        ],
+        messages: Array.from({ length: 6 }, () => ({ data: { id: "msg-h" }, error: null })),
+      });
+    const outcome = await sendSmsToContact(failing,
+      { origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ },
+    );
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_fresh_state_unavailable", error: "read timeout" });
+    // The sequence authorization RPC never ran, so the claim is still
+    // `not_attempted` and the tick can retire it and retry (see tick.test.ts).
+    expect(failing.rpc).not.toHaveBeenCalled();
+  });
+
+  it("sends a drip/sequence text once the hold is cleared", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(HOSTILE_CLEARED), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145", sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "sent", messageId: "msg-h" });
+  });
+
+  it("does not apply the hold to a non-campaign, non-sequence automated send (AI reply)", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(HOSTILE_OPEN), {
+      origin: "automated", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "sent" });
+  });
+
+  it("a manual inbox send to a property with an open hold still sends", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(HOSTILE_OPEN), {
+      origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "sent" });
+  });
+
+  it("a person-initiated held draft to a property with an open hold still sends", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await sendSmsToContact(holdSupabase(HOSTILE_OPEN), {
+      origin: "automated", personInitiated: true, contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "hello", from: "+18165550145",
+      sequenceContext: SEQ,
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "sent" });
+  });
+});
+
+describe("releaseQueuedMessage — open stop-texting / hostile hold", () => {
+  function queuedRow(campaignId: string | null) {
+    return {
+      id: "queued-h", status: "queued", provider: "fake-test-provider", org_id: PROPERTY_ROW.org_id,
+      campaign_id: campaignId, contact_id: CONTACT_ID, property_id: PROPERTY_ID,
+      body: "Hi there, Mel with BMH here.", from_address: "+18165550145", to_address: CONTACT_ROW.phone_1,
+      scheduled_for: null, metadata: { sendOrigin: "automated" },
+    };
+  }
+  function releaseSupabase(fresh: Record<string, unknown>, final: Record<string, unknown> = fresh) {
+    return fakeSupabase({
+      messages: Array.from({ length: 8 }, (_, i) =>
+        i === 0 ? { data: queuedRow("camp-1"), error: null } : { data: { id: "queued-h", body: queuedRow("camp-1").body }, error: null }),
+      campaigns: Array.from({ length: 4 }, () => ({ data: { status: "active", paused_at: null }, error: null })),
+      contacts: [{ data: CONTACT_ROW, error: null }, { data: { do_not_contact: false, sms_opted_out: false }, error: null }],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: { outreach_dispo: null, ...fresh }, error: null },
+        { data: { ...final }, error: null },
+      ],
+    });
+  }
+
+  it("holds a queued campaign row for a property with an open hostile hold", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await releaseQueuedMessage(releaseSupabase(HOSTILE_OPEN), "queued-h");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold" });
+  });
+
+  it("holds a queued campaign row when the hold is committed after the first check but before dispatch", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const outcome = await releaseQueuedMessage(releaseSupabase(NO_HOLD, HOSTILE_OPEN), "queued-h");
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "blocked_automated_suppressed", source: "open_confirm_hold" });
+  });
+});

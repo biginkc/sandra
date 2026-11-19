@@ -63,7 +63,7 @@ describe("acquisition history rendering and recovery", () => {
   it("renders literal note, actor, real timestamp and no unsafe recording link", () => {
     render(<AcquisitionHistoryCard fact={fact} actor="Rep A" />);
     expect(screen.getByText("No answer")).toBeInTheDocument();
-    expect(screen.queryByText("Follow-up required")).not.toBeInTheDocument();
+    expect(screen.queryByText("Text follow-up: Required")).not.toBeInTheDocument();
     expect(screen.getByText(fact.note!)).toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.getByText(/Rep A/)).toBeInTheDocument();
@@ -78,8 +78,10 @@ describe("acquisition history rendering and recovery", () => {
   it("renders the follow-up badge for a no-answer with a durable obligation", () => {
     render(<AcquisitionHistoryCard fact={obligationFact} actor="Rep A" />);
 
-    expect(screen.getByText("Follow-up required")).toBeInTheDocument();
-    expect(screen.getByText("Choose a text template before sending.")).toBeInTheDocument();
+    expect(screen.getByText("Text follow-up: Required")).toBeInTheDocument();
+    expect(screen.getByTestId("attempt-follow-up-with-follow-up")).toBeInTheDocument();
+    expect(screen.getByText("Status detail: Choose a text template before sending.")).toBeInTheDocument();
+    expect(screen.getByText("Open Text lead to resume this saved follow-up.")).toBeInTheDocument();
   });
   it("does not show a provider-reconciled status without a durable obligation", () => {
     render(
@@ -89,7 +91,7 @@ describe("acquisition history rendering and recovery", () => {
       />,
     );
 
-    expect(screen.queryByText(/Follow-up/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Text follow-up/)).not.toBeInTheDocument();
     expect(screen.queryByText(/required/)).not.toBeInTheDocument();
   });
   it("does not invent required when an obligation has no status enrichment", () => {
@@ -101,7 +103,7 @@ describe("acquisition history rendering and recovery", () => {
     );
 
     expect(screen.getByText("Follow-up status unavailable")).toBeInTheDocument();
-    expect(screen.queryByText("Follow-up required")).not.toBeInTheDocument();
+    expect(screen.queryByText("Text follow-up: Required")).not.toBeInTheDocument();
   });
   it("retains loaded facts after page failure and retries first page", async () => {
     load

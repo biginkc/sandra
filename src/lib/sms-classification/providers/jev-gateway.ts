@@ -1,7 +1,15 @@
-import { buildQuestions, JEV_MODEL, JEV_SCHEMA_VERSION, OUTCOME_CRITERIA } from "../questions";
+import {
+  buildQuestions,
+  JEV_MODEL,
+  JEV_SCHEMA_VERSION,
+  NUMBER_SOURCE_QUESTION_ID,
+  OUTCOME_CRITERIA,
+} from "../questions";
 import type {
   JevEscalationReason,
+  JevListingStatus,
   JevOutcome,
+  JevReadyTimeframe,
   JevReplyIntent,
   JevWrongScope,
   SmsClassificationDecision,
@@ -46,6 +54,20 @@ const ESCALATION_REASON_VALUES: readonly JevEscalationReason[] = [
   "third_party",
   "needs_review",
   "not_applicable",
+  "uncertain",
+];
+const YES_NO_VALUES: readonly ("yes" | "no")[] = ["yes", "no"];
+const READY_TIMEFRAME_VALUES: readonly JevReadyTimeframe[] = [
+  "within_30_days",
+  "one_to_six_months",
+  "six_to_twelve_months",
+  "over_a_year",
+  "not_stated",
+  "uncertain",
+];
+const LISTING_STATUS_VALUES: readonly JevListingStatus[] = [
+  "listed",
+  "not_listed_or_not_stated",
   "uncertain",
 ];
 const REPLY_INTENT_VALUES: readonly JevReplyIntent[] = [
@@ -119,7 +141,16 @@ export type JevAskRequest = {
   questions: Record<string, JevChoiceQuestion | JevNoulQuestion>;
 };
 export type JevAskResult = JevRawResponse & { latencyMs: number };
-export type JevAskDeps = { fetch: FetchLike; apiKey: string; maxRetries?: number; timeoutMs?: number };
+/** One HTTP attempt's result: "ok" or why it failed (for per-attempt spend accounting). */
+export type JevAttemptOutcome = "ok" | JevProviderError["kind"] | "transport";
+export type JevAskDeps = {
+  fetch: FetchLike;
+  apiKey: string;
+  maxRetries?: number;
+  timeoutMs?: number;
+  /** Called once per HTTP attempt actually made (observation only; never changes the call). */
+  onAttempt?: (outcome: JevAttemptOutcome) => void;
+};
 
 /**
  * The one HTTP client for TypeSafe System One (shared by SMS classification and call facts).
@@ -137,6 +168,7 @@ export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let attemptOutcome: JevAttemptOutcome = "transport";
     try {
       const res = await deps.fetch(JEV_ENDPOINT, {
         method: "POST",
@@ -152,6 +184,7 @@ export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         const err = classifyHttpFailure(res.status, text);
+        attemptOutcome = err.kind;
         if (err.kind === "auth" || err.kind === "billing") throw err;
         lastErr = err;
         if (attempt < maxRetries) {
@@ -161,12 +194,15 @@ export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<
         throw err;
       }
 
+      attemptOutcome = "invalid_response";
       const json = (await res.json()) as JevRawResponse;
+      attemptOutcome = "ok";
       return { ...json, latencyMs: Date.now() - startedAt };
     } catch (e) {
       clearTimeout(timer);
       if (e instanceof JevProviderError) throw e;
       if (e instanceof Error && e.name === "AbortError") {
+        attemptOutcome = "timeout";
         lastErr = new JevProviderError("Jev request timed out", "timeout");
         if (attempt < maxRetries) {
           await sleep(backoffMs(attempt));
@@ -175,6 +211,8 @@ export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<
         throw lastErr;
       }
       throw e;
+    } finally {
+      try { deps.onAttempt?.(attemptOutcome); } catch { /* observation only */ }
     }
   }
   throw lastErr ?? new JevProviderError("Jev request failed", "server_error");
@@ -213,6 +251,9 @@ function parseJevResponse(
     "escalation_reason",
     ESCALATION_REASON_VALUES,
   );
+  const numberSource = readChoice(json.answers, NUMBER_SOURCE_QUESTION_ID, YES_NO_VALUES);
+  const readyTimeframe = readChoice(json.answers, "ready_timeframe", READY_TIMEFRAME_VALUES);
+  const listingStatus = readChoice(json.answers, "listing_status", LISTING_STATUS_VALUES);
   const replyIntent = includeReplyIntent
     ? readChoice(json.answers, "reply_intent", REPLY_INTENT_VALUES)
     : { value: null, probabilities: {} };
@@ -224,6 +265,12 @@ function parseJevResponse(
     probabilities.wrong_scope = wrongScope.probabilities;
   if (Object.keys(escalationReason.probabilities).length)
     probabilities.escalation_reason = escalationReason.probabilities;
+  if (Object.keys(numberSource.probabilities).length)
+    probabilities[NUMBER_SOURCE_QUESTION_ID] = numberSource.probabilities;
+  if (Object.keys(readyTimeframe.probabilities).length)
+    probabilities.ready_timeframe = readyTimeframe.probabilities;
+  if (Object.keys(listingStatus.probabilities).length)
+    probabilities.listing_status = listingStatus.probabilities;
   if (includeReplyIntent && Object.keys(replyIntent.probabilities).length)
     probabilities.reply_intent = replyIntent.probabilities;
 
@@ -233,6 +280,9 @@ function parseJevResponse(
     wrongScope: wrongScope.value,
     escalationReason: escalationReason.value,
     replyIntent: replyIntent.value,
+    askedHowNumberObtained: numberSource.value === null ? null : numberSource.value === "yes",
+    readyTimeframe: readyTimeframe.value,
+    listingStatus: listingStatus.value,
     replyIntentAvailable: includeReplyIntent,
     probabilities,
     provider: "jev",

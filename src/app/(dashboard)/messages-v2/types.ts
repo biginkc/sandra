@@ -62,7 +62,11 @@ export type PipelineRunStep = {
 };
 
 /** A run with its ordered steps, as rendered by the feed. */
-export type RunWithSteps = PipelineRun & { steps: PipelineRunStep[] };
+export type RunWithSteps = PipelineRun & {
+  steps: PipelineRunStep[];
+  /** Hot hand-off only: when Jarrad's Slack and text both went out (display). */
+  hotAlertSentAt?: string | null;
+};
 
 /** Display-only context for a run's seller. */
 export type RunLabel = {
@@ -171,6 +175,14 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
    * flagged before start times were tracked): such a hold never alerts.
    */
   alert_since?: string | null;
+  /**
+   * The newest instant anything happened on the hold's own sources: its flag, or the newest pending
+   * decision / review / draft. `since` is the OLDEST of these, so ordering by "what moved most recently"
+   * must use this. null = nothing reliable known.
+   */
+  last_activity?: string | null;
+  /** Newest run start / step across ALL runs related to the hold (not only the one shown). Set by the waiting list. */
+  related_activity?: string | null;
   /** Plain-text description of why it is open (source labels + escalation reason). */
   reason: string;
   run: R | null;
@@ -183,6 +195,13 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   draft?: {
     id: string;
     inbound_message_id: string | null;
+    /** The run this draft was written for; lets a propertyless draft resolve (and DNC-verify) its property. */
+    run_id?: string | null;
+    /**
+     * False when the draft row has no property_id of its own (it was tied to the property through its run, message or
+     * conversation). The hold Send/Edit path only sends drafts tied directly to a property, so the card disables them.
+     */
+    sendable?: boolean;
     body?: string;
     edited_body?: string | null;
     /** Version of the human edit (null = never edited). Sent back with Send / Edit so a changed draft is refused. */
@@ -200,6 +219,10 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   dead_letter?: boolean;
   /** At least one dead-letter for this hold is `sent_late` (provider accepted it after the timeout). Does NOT mean every dead-letter is late; see `dead_letters`. */
   dead_letter_late?: boolean;
+  /** The server's final check found this hold changed while the page was built: the card renders Updated. */
+  recheck_changed?: boolean;
+  /** Snapshot cards: the frozen DISPLAY reason (tag and sentence). Action controls never read it: they use flag_reason. */
+  display_reason?: string | null;
   /** One entry per inbound/run dead-letter on this hold; `late` = provider accepted it late. */
   dead_letters?: DeadLetterInfo[];
   /** Latest alert delivery for this hold's property (hold_alert_deliveries); absent = none recorded. */

@@ -4,6 +4,12 @@ import { after } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import {
+  enrollNurtureInDrip,
+  loadNurtureAutoDripConfig,
+  type NurtureAutoDripConfig,
+} from "./nurture-auto-drip";
+import { routeNurture, type NurtureRoute } from "./nurture-routes";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getConsentStateStrict } from "@/lib/messaging/consent";
@@ -13,13 +19,27 @@ import {
   checkRecipientQuietHours,
 } from "@/lib/messaging/quiet-hours-recipient";
 import { sendSmsToContact } from "@/lib/messaging/send";
+import { WEBHOOK_PROCESSING_LEASE_MS } from "@/lib/messaging/webhook-lease";
+import { testBarrier, testFault } from "@/lib/testing/test-barriers";
+import { TEST_SEND_REFUSED } from "@/lib/messaging/send-allowlist";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
-import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
+import { isSuppressed, shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { recordPausedEnrollmentsForUndo } from "./undo";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import { assignHotLeadToOwner, recordHotFailure, recordHotTextOnHeldLead } from "@/lib/hot-sellers/assign";
+import { HOT_KEYWORD_TIER, isHotReason, isHotSeller } from "@/lib/hot-sellers/hot";
+
+/** Hold reason: the rendered nine-question reply differs from the approved text; nothing was sent. */
+export const NINE_REPLY_TEXT_NOT_APPROVED = "reply_text_not_approved";
+/** Hold reason when a hot seller could not be handed to Jarrad (hot: still alerts). */
+const HOT_LEAD_ASSIGN_FAILED_REASON = "hot_lead_assign_failed";
+/** Hold reason when the lead is on My Leads under Jarrad but its 'assigned' event did not save (hot). */
+const HOT_LEAD_EVENT_FAILED_REASON = "hot_lead_event_failed";
+/** A hot text on a lead someone else owns whose alert event could not be saved (the lead was NOT moved to Jarrad). */
+const HOT_ALERT_EVENT_FAILED_REASON = "hot_alert_event_failed";
 
 import {
   recordStep,
@@ -67,6 +87,7 @@ import {
   REPLY_RETRY_MAX,
   writeReplyDeadLetter,
   type AiRetryOutcome,
+  type NineDeferral,
   type RetryReason,
   type RetryReply,
 } from "./retry";
@@ -79,12 +100,78 @@ import {
 } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
-import { matchEscalationKeyword } from "./keywords";
+import { APPROVED_REPLY_TEXTS } from "./approved-reply-texts";
+import {
+  enrollNineDrip,
+  CLASSIFIER_ENGINE_UNREADABLE,
+  readClassifierEngine,
+  runNineClassification,
+  type NineDripResult,
+} from "./nine-questions-engine";
+import {
+  actionForNineAnswer,
+  NINE_HOT_REPLY_TEXTS,
+  NINE_REPEAT_NOT_INTERESTED_RULE,
+  type NineHotReply,
+  type NineQuestionResult,
+} from "@/lib/sms-classification/nine-questions";
+import { loadOrgThresholdMap } from "@/lib/sms-classification/thresholds";
+import { hasAllowedPriceSignal, hasNonPriceEscalationPhrase, matchEscalationKeyword, nonPriceTier, priceSignalAllowed } from "./keywords";
+import {
+  NUMBER_SOURCE_ANSWER_RECEIVED_REASON,
+  NUMBER_SOURCE_AWAITING_ANSWER_REASON,
+  NUMBER_SOURCE_NOT_SENT_PREFIX,
+} from "./number-source";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
 import { HOSTILE_NEEDS_CONFIRM_REASON, isHostileInbound } from "./hostile";
+import { markObligationUnrecorded, openSafetyObligation, promoteUnrecordedObligationMarkers } from "./safety-obligations";
+import { buildTwoWayThreadState } from "@/lib/sms-classification/context";
+import { classifyV2, JevAttemptsError, v2ProviderDeps, type V2Classification } from "@/lib/sms-classification/routing-v2/classify";
+import type { JevAttemptOutcome } from "@/lib/sms-classification/providers/jev-gateway";
+import { alertOnTimeOnlyInForce, isV2Eligible, readRoutingV2Flags, readRoutingV2FlagsResult, v2SliceAllowed, type RoutingV2Flags } from "@/lib/sms-classification/routing-v2/flags";
+import { executeV2Stop } from "@/lib/sms-classification/routing-v2/model-stop-suppression";
+import {
+  runRoutingV2PhoneAction,
+  settleUnsettledRoutingV2PhoneReplies,
+  type SendWrongNumberReply,
+} from "@/lib/sms-classification/routing-v2/wrong-number-all";
+import { classifyWrongNumberScope } from "@/lib/messaging/wrong-number-scope";
+import { liveDecisionRow, recordLiveV2Decision, recordLiveV2DecisionRow } from "@/lib/sms-classification/routing-v2/live-decisions";
+import { V2_ALERT_LABELS, type V2Action, type V2Step } from "@/lib/sms-classification/routing-v2/actions";
+import {
+  DEALMACHINE_NO_KEY,
+  MODEL_STOP_NO_PHONE,
+  recordRoutingV2Audit,
+  recordV2ModelSpend,
+  V2_LIVE_JEV_POLICY,
+  V2_OUTBOX_REASON,
+  liveHoldReason,
+  liveStepFor,
+  V2_JEV_FAILED,
+  queueLiveHoldAlerts,
+  readLiveV2Evidence,
+  storedFinalDecision,
+  storedV2Decision,
+  type StoredLiveEvidence,
+} from "@/lib/sms-classification/routing-v2/live-dispatch";
+import { applyStoredV2Transition } from "@/lib/sms-classification/routing-v2/live-transition";
+import { deliverV2Outbox, type V2OutboxIntent, type V2OutboxResult } from "@/lib/sms-classification/routing-v2/outbox";
+import { resolveV2Reply } from "@/lib/sms-classification/routing-v2/reply-template";
+import type { V2AnyReplyKey } from "@/lib/sms-classification/routing-v2/reply-texts";
+import {
+  lookupDealMachineValue,
+  supabaseDealMachineCacheStore,
+  type ValueLookupResult,
+} from "@/lib/sms-classification/routing-v2/dealmachine-value";
+import { fetchDealMachineEstimatedValue } from "@/lib/comps/providers/dealmachine";
 import { SOLD_NEEDS_HUMAN_REASON, isSoldInbound } from "./sold";
-import { resolveApprovedTemplateReply, type TemplateReplyKey } from "./template-reply";
+import {
+  hasSendableNumberSourceTemplate,
+  NUMBER_SOURCE_REPLY_KEY,
+  resolveApprovedTemplateReply,
+  type TemplateReplyKey,
+} from "./template-reply";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 import type {
   AiMessageMetadata,
@@ -273,7 +360,97 @@ export type AiDispatchInput = {
   replyDelayBypassed?: boolean;
   /** Why: `delay_not_applied` = the delay clamped to 0 with a delay configured; `delay_not_configured` = the org has no reply delay (max 0), so templates never send; default `delay_unavailable`. */
   replyDelayBypassReason?: "delay_unavailable" | "delay_not_applied" | "delay_not_configured";
+  /** A nine-question reply deferred until the send window opened (see ./retry NineDeferral). */
+  nineDeferral?: NineDeferral;
+  /** A deferred run re-deciding from scratch: how many deferrals came before (loop bound only). */
+  nineDeferCount?: number;
+  /**
+   * Routing v2 backfill (scripts/routing-v2-backfill.ts) re-dispatching an OLD unanswered seller
+   * text through this same entry. Absent on every live path (webhook / delay workflow), so live
+   * behaviour is unchanged. See docs/routing-v2-backfill.md.
+   */
+  routingV2Backfill?: RoutingV2BackfillContext;
 };
+
+/** Backfill modes that reach the dispatch (dry-run never dispatches). */
+export type RoutingV2BackfillContext = {
+  runId: string;
+  /**
+   * apply = the full live treatment (replies <= --text-max-age-days old). sort_only = older
+   * replies: decided and sorted (stops, holds, closes, hot alerts into Jarrad's queue) but NO
+   * auto reply and NO drip (Jarrad 2026-10-31).
+   */
+  mode: "classify_only" | "apply" | "sort_only";
+  /**
+   * Apply / sort-only: the decision row an earlier classify-only run built for this inbound
+   * (never written to routing_v2_live_decisions by classify-only). It is recorded now exactly
+   * as a live decision would be (a safety decision through the atomic recorder) and carried
+   * out, with no second model call.
+   */
+  storedDecisionRow?: Record<string, unknown>;
+  /**
+   * Classify-only: receives the decision row instead of the database. Classify-only writes no
+   * decision row, hold, pause, cancel, alert, obligation, reply or drip (Opus review B1).
+   */
+  onClassified?: (row: Record<string, unknown>) => Promise<void>;
+  /**
+   * Apply / sort-only resume: an interrupted backfill apply already recorded this text's decision
+   * (routing_v2_live_decisions); carry out that row instead of classifying again.
+   */
+  resumeRecordedDecision?: boolean;
+};
+
+/** A backfill text the v2 engine did not take (flags / canary / engine off, or unreadable): skipped, never the legacy engine. */
+export const ROUTING_V2_BACKFILL_V2_NOT_LIVE = "routing_v2:backfill_v2_not_live";
+/** Classify-only: the text would take the up-front keyword hold (a side effect): skipped, reported as keyword_hold. */
+export const ROUTING_V2_BACKFILL_CLASSIFY_KEYWORD_HOLD = "routing_v2:backfill_classify_only_keyword_hold";
+/** Classify-only's own claim key: the live responder claim (sms_ai_responder_v1) is never touched. */
+export const ROUTING_V2_BACKFILL_CLASSIFY_RESPONSE_KIND = "sms_ai_responder_v1:backfill_classify";
+/** Apply / sort-only: a newer seller text exists on the property, so this older one is not acted on. */
+export const ROUTING_V2_BACKFILL_NEWER_INBOUND = "routing_v2:backfill_newer_inbound";
+/** Classify-only could not decide without a side effect (a hold, a recorder failure): skipped. */
+export const ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE = "routing_v2:backfill_classify_only_unavailable";
+
+/** Claim / outcome reason of a classify-only backfill dispatch: decision recorded, nothing carried out. */
+export const ROUTING_V2_BACKFILL_CLASSIFY_ONLY = "routing_v2:backfill_classify_only";
+
+/**
+ * Roads whose approved seller text only makes sense right after the seller's message, so an OLD
+ * reply must not get it. In backfill apply these hold for a person (existing reason, existing
+ * hold alert copy) instead of sending. No text is invented or reworded for the backlog.
+ * - driving_reply+book_appointment: "Okay, thank you for letting me know. I'll reach out to you
+ *   later." answers "I'm driving"; days later it is wrong.
+ */
+export const ROUTING_V2_BACKFILL_HOLD_ROADS: ReadonlySet<string> = new Set(["driving_reply+book_appointment"]);
+
+/** Hot roads: in sort-only their owner alerts are raised and the lead goes to Jarrad's queue. */
+const ROUTING_V2_SORT_ONLY_HOT_ROADS: ReadonlySet<string> = new Set([
+  "book_appointment", "reaction+book_appointment", "driving_reply+book_appointment", "price_check", "ALERT_call_me",
+]);
+
+export type RoutingV2SortOnlyKind =
+  /** Same as live: Jev failed / stop / bad number / any hold road (nothing is ever sent on these). */
+  | "live_failed" | "live_stop" | "live_bad_number" | "live_hold"
+  /** Close this property, no reply: existing AI disposition writer (this property only). */
+  | "close_wrong_number" | "close_not_interested"
+  /** Hot or alert road: its stored owner alerts + a needs-person hold (no reply, no drip). */
+  | "alert_and_hold"
+  /** Every other road: decision recorded, nothing carried out. */
+  | "record_only";
+
+/** What sort-only does with a stored decision (pure; the report uses the same function). */
+export function routingV2SortOnlyKind(e: Pick<StoredLiveEvidence, "status" | "action" | "failure_reason">): RoutingV2SortOnlyKind {
+  const step = liveStepFor(e as StoredLiveEvidence);
+  if (step.kind === "failed") return "live_failed";
+  if (step.kind === "stop") return "live_stop";
+  if (step.kind === "bad_number") return "live_bad_number";
+  if (step.kind === "wrong_number") return "close_wrong_number";
+  if (step.kind === "hold") return "live_hold";
+  const road = e.action?.road ?? "";
+  if (road === "not_interested_drip") return "close_not_interested";
+  if (ROUTING_V2_SORT_ONLY_HOT_ROADS.has(road) || (e.action?.steps ?? []).some((s) => s.kind === "alert")) return "alert_and_hold";
+  return "record_only";
+}
 
 export type AiDispatchOptions = {
   checkSuperseded?: boolean;
@@ -319,6 +496,7 @@ type AiDispatchPropertyGateRow = Pick<
   | "ai_responder_disabled"
   | "homeowner_contact_id"
   | "id"
+  | "last_ai_escalation_reason"
   | "needs_human_attention"
   | "org_id"
   | "outreach_dispo"
@@ -326,8 +504,54 @@ type AiDispatchPropertyGateRow = Pick<
 >;
 
 export type AiDispatchPreGateResult =
-  | { ok: true; property: AiDispatchPropertyGateRow }
+  | { ok: true; property: AiDispatchPropertyGateRow; routingV2Live?: boolean }
   | { ok: false; outcome: AiDispatchOutcome };
+
+/**
+ * Stress F8/F9 at b6a00a0a2f17 (round 17): a keyword / legal / possible-stop hold that could not be
+ * written fails closed. The lead's v2 drips are paused, its pending v2 auto replies cancelled, and
+ * (v2 live) an unrecovered safety marker is stored for the inbound (a failed decision row with no
+ * effects): the apply gate blocks the lead's newer texts and the sweep re-attempts the hold.
+ */
+async function keywordHoldFailClosed(
+  supabase: SupabaseClient<Database>,
+  a: { propertyId: string; inboundMessageId?: string | null; orgId?: string | null; reason: string },
+): Promise<void> {
+  try {
+    await keywordHoldFailClosedInner(supabase, a);
+  } catch (e) {
+    reportError(e, { tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId } });
+  }
+}
+
+async function keywordHoldFailClosedInner(
+  supabase: SupabaseClient<Database>,
+  a: { propertyId: string; inboundMessageId?: string | null; orgId?: string | null; reason: string },
+): Promise<void> {
+  reportError(new Error("keyword hold could not be written; failing closed"), {
+    tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId, reason: a.reason },
+  });
+  await pauseV2DripsFailClosed(supabase, a.propertyId);
+  const loose = supabase as unknown as {
+    from: (t: string) => {
+      update: (v: Record<string, unknown>) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => PromiseLike<{ error: { message: string } | null }> } } };
+      insert: (r: Record<string, unknown>) => PromiseLike<{ error: { code?: string; message: string } | null }>;
+    };
+  };
+  const cancel = await loose.from("routing_v2_outbox").update({ status: "cancelled", cancel_reason: "held_for_person" })
+    .eq("property_id", a.propertyId).eq("kind", "reply").eq("status", "pending");
+  if (cancel.error) reportError(new Error(cancel.error.message), { tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId } });
+  // Round 18: the unresolved obligation (flags on or off) blocks newer texts and every automated
+  // send on the lead until the hold lands (the sweep re-attempts it) or a person resolves it.
+  const recorded = await openSafetyObligation(supabase, { propertyId: a.propertyId, inboundMessageId: a.inboundMessageId ?? null, reason: a.reason, source: "keyword" });
+  // Opus B4 on #956: if even the obligation cannot be written, the claim-independent fallback record
+  // blocks instead (same predicate); if that fails too, the error is reported (#954 makes the webhook retry).
+  if (!recorded && !(await markObligationUnrecorded(supabase, { propertyId: a.propertyId, inboundMessageId: a.inboundMessageId ?? null, reason: a.reason }))) {
+    reportError(new Error("keyword hold: obligation and fallback marker both unwritable"), {
+      tags: { surface: "ai_responder_keyword_hold" }, extra: { propertyId: a.propertyId, reason: a.reason },
+    });
+  }
+}
 
 export async function applyKeywordEscalation(
   supabase: SupabaseClient<Database>,
@@ -336,11 +560,45 @@ export async function applyKeywordEscalation(
     inboundBody: string;
     escalationKeywords?: ReadonlyArray<string> | null;
     runContext?: MaybeRunContext;
+    /**
+     * Jev automatic: a price signal never writes a HOT hold up front (before
+     * consent checks and classification). A price-only text writes nothing
+     * here (the shared hot decision handles it after the gates); a mixed text
+     * keeps a person-review hold under its NON-price reason, which can only be
+     * alerted by the later classify-only check if stop / DNC / wrong / bad
+     * number does not win.
+     */
+    jevAutomatic?: boolean;
+    /** The inbound and its org (round 17): a hold that cannot be written fails closed for it. */
+    inboundMessageId?: string | null;
+    orgId?: string | null;
   },
-): Promise<{ escalated: true; reason: string } | { escalated: false }> {
+): Promise<{ escalated: true; reason: string; flagOk: boolean } | { escalated: false }> {
   const keywordMatch = matchEscalationKeyword(args.inboundBody, {
     allowedPhrases: args.escalationKeywords ?? undefined,
   });
+  if (args.jevAutomatic && keywordMatch && hasAllowedPriceSignal(args.inboundBody, args.escalationKeywords ?? null)) {
+    const otherTier = nonPriceTier(args.inboundBody, args.escalationKeywords ?? null);
+    if (!otherTier) {
+      await trace(supabase, {
+        kind: "gate",
+        name: "escalation_keyword",
+        result: "pass",
+        detail: { tier: HOT_KEYWORD_TIER, deferred: "shared_hot_decision" },
+      }, args.runContext);
+      return { escalated: false };
+    }
+    const mixedReason = `keyword:${otherTier}`;
+    await trace(supabase, {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "block",
+      detail: { tier: otherTier, alsoPrice: true },
+    }, args.runContext);
+    const mixedOk = await markPropertyNeedsAttention(supabase, args.propertyId, mixedReason, args.runContext);
+    if (!mixedOk) await keywordHoldFailClosed(supabase, { ...args, reason: mixedReason });
+    return { escalated: true, reason: mixedReason, flagOk: mixedOk };
+  }
   if (!keywordMatch) {
     await trace(
       supabase,
@@ -350,7 +608,11 @@ export async function applyKeywordEscalation(
     return { escalated: false };
   }
 
-  const reason = `keyword:${keywordMatch.tier}`;
+  // A numeric amount the org's allow-list does not cover is still held (as on
+  // main) but under a non-hot reason: it never drives a hot alert.
+  const unlistedNumeric =
+    keywordMatch.tier === "price_offer" && !priceSignalAllowed(keywordMatch, args.escalationKeywords ?? null);
+  const reason = unlistedNumeric ? "keyword:numeric_amount" : `keyword:${keywordMatch.tier}`;
   await trace(
     supabase,
     {
@@ -361,13 +623,14 @@ export async function applyKeywordEscalation(
     },
     args.runContext,
   );
-  await markPropertyNeedsAttention(
+  const flagOk = await markPropertyNeedsAttention(
     supabase,
     args.propertyId,
     reason,
     args.runContext,
   );
-  return { escalated: true, reason };
+  if (!flagOk) await keywordHoldFailClosed(supabase, { ...args, reason });
+  return { escalated: true, reason, flagOk };
 }
 
 export async function checkAiResponderDispatchPreGates(
@@ -387,7 +650,7 @@ export async function checkAiResponderDispatchPreGates(
   const { data: property } = await supabase
     .from("properties")
     .select(
-      "id, org_id, state, ai_responder_disabled, outreach_dispo, needs_human_attention, homeowner_contact_id",
+      "id, org_id, state, ai_responder_disabled, outreach_dispo, needs_human_attention, homeowner_contact_id, last_ai_escalation_reason, is_dnc_locked",
     )
     .eq("id", input.propertyId)
     .maybeSingle();
@@ -398,14 +661,80 @@ export async function checkAiResponderDispatchPreGates(
       outcome: { outcome: "skipped", reason: "property_not_found" },
     };
   }
-  if (isTerminalAiResponderProperty(property)) {
+  if (property.needs_human_attention && !input.routingV2Backfill && (await isAnswerToNumberSourceReply(supabase, input))) {
+    // The seller is answering "want me to take you off the list?". The property
+    // is already held, but the answer must not vanish into a silent
+    // already-terminal exit: refresh the hold so a person sees there is a new
+    // message. When the hold is our own awaiting marker its reason becomes
+    // `number_source_answer_received`; when the property was already held for
+    // another reason that reason is kept (a person still needs it) and only the
+    // hold's timestamp moves. Nothing is sent and nothing is suppressed.
+    const now = new Date().toISOString();
+    const own = property.last_ai_escalation_reason === NUMBER_SOURCE_AWAITING_ANSWER_REASON;
+    // A HOT flag keeps its own time: its alert key (hot_flag:<property>:<flagAt>)
+    // must not move, or a non-hot answer would page Jarrad again.
+    const keepFlagTime = isHotReason(property.last_ai_escalation_reason);
+    let q = supabase
+      .from("properties")
+      .update({
+        ...(own ? { last_ai_escalation_reason: NUMBER_SOURCE_ANSWER_RECEIVED_REASON } : {}),
+        ...(keepFlagTime ? {} : { last_ai_escalation_at: now }),
+        updated_at: now,
+      })
+      .eq("id", input.propertyId)
+      .eq("needs_human_attention", true);
+    if (own) q = q.eq("last_ai_escalation_reason", NUMBER_SOURCE_AWAITING_ANSWER_REASON);
+    const { data: refreshed } = await q.select("id").maybeSingle();
+    await blocked(NUMBER_SOURCE_ANSWER_RECEIVED_REASON);
+    if (refreshed) {
+      return { ok: false, outcome: flaggedSkip(NUMBER_SOURCE_ANSWER_RECEIVED_REASON) };
+    }
+  }
+  // Opus review of 93a8070932bd (B1): "is routing v2 live for this property" is decided ONCE, with
+  // the strict read, before the terminal gate. That single answer picks v2 vs legacy below and
+  // decides whether an older mechanics hold yields; a read error is "not live", so the hold stays.
+  const v2LiveState = input.inboundMessageId
+    ? (testFault("dispatch:v2_live_read", { propertyId: input.propertyId, inboundMessageId: input.inboundMessageId })
+        ? "error"
+        : await routingV2LiveForSweep(supabase, property.org_id, input.propertyId))
+    : "no";
+  const routingV2Live = v2LiveState === "yes";
+  // Routing v2 backfill resume (Astra review 2b-3): an interrupted apply whose atomic recorder
+  // already wrote THIS text's safety hold must still finish that decision's remaining effects
+  // (suppression, alerts). Only when the lead's hold is the one written for this very text.
+  const backfillResumeOwnHold = routingV2Live && !!input.routingV2Backfill?.resumeRecordedDecision && property.needs_human_attention
+    && (await backfillHoldIsFor(supabase, input.propertyId, input.inboundMessageId ?? null));
+  if (isTerminalAiResponderProperty(property) && !backfillResumeOwnHold
+      && !(routingV2Live && (await mechanicsHoldYieldsTo(supabase, property, input.inboundMessageId, { v2Live: true })))) {
+    // PR 2: a lead that already needs a person, or carries a human-owned
+    // disposition (nurture / callback / booked), still gets ONE classify-only
+    // look so a new hot text reaches Jarrad (owner rule 2026-10-19: every hot
+    // reply alerts him): no reply, no drip, no disposition, no assignment
+    // change; non-hot exits exactly as before. True suppression (wrong / bad
+    // number, DNC, opted out) is refused inside classifyOnlyForHotText, and
+    // DNC-locked leads are never classified.
+    // A backfill text whose lead became held / closed after selection is left to the person.
+    if (!property.is_dnc_locked && input.inboundMessageId && !input.routingV2Backfill) {
+      await classifyOnlyForHotText(supabase, input, property, runCtx);
+    }
     await blocked("already_terminal");
     return {
       ok: false,
       outcome: silentSkip("already_terminal", 0),
     };
   }
+  await testBarrier("dispatch:after_early_gate", { propertyId: input.propertyId, inboundMessageId: input.inboundMessageId ?? null });
 
+  // Stress review A-2 (latest reply wins): with routing v2 live, a newer seller text (rule 1),
+  // an auto reply to another inbound (rule 3) or a drip / campaign text (rule 5) sent since this
+  // inbound never parks or drops it here. Every reply is
+  // classified and recorded; the v2 transition keeps the newest reply's route (an older one
+  // queues only its owner alerts) and the outbox fence refuses a stale auto reply.
+  // Routing v2 backfill: v2 not live for this text right now = skipped before any gate can flag it.
+  if (input.routingV2Backfill && !routingV2Live) {
+    await blocked(ROUTING_V2_BACKFILL_V2_NOT_LIVE);
+    return { ok: false, outcome: { outcome: "skipped", reason: ROUTING_V2_BACKFILL_V2_NOT_LIVE } };
+  }
   if (input.inboundMessageId) {
     // Q8 decision table at the early gate: rule 0 (suppression / disabled /
     // terminal) and rule 8 first, then rules 1-6, first match wins; the same
@@ -416,6 +745,7 @@ export async function checkAiResponderDispatchPreGates(
       claimStartedAt: null,
       checkNewerInbound: options.checkSuperseded === true,
       property,
+      ...(routingV2Live ? { mechanicsYield: "decided" as const } : {}),
     });
     if (evaluation.ok) {
       const decision = evaluation.decision;
@@ -423,10 +753,19 @@ export async function checkAiResponderDispatchPreGates(
       // disabled property) keep their existing downstream handling (the skip
       // classifier still lets Jev classify): silent, nothing flagged here,
       // and rules 1-6 must not run for a dead lead.
-      const passThrough = decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal";
+      const passThrough = (decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal")
+        || (backfillResumeOwnHold && decision.action === "skip" && decision.rule === 0 && decision.reason === "already_terminal")
+        // An interrupted backfill apply already sent its OWN reply to this text (e.g. the wrong-person
+        // reply, then crashed before the close): the resume finishes the decision, never sends again.
+        || (!!input.routingV2Backfill?.resumeRecordedDecision && decision.action === "skip" && decision.rule === 2 && decision.answeredBy === "ai")
+        || (routingV2Live && decision.action === "skip" && (decision.rule === 1 || decision.rule === 3 || decision.rule === 5));
       const plan = passThrough ? null : skipPlanFor(decision, "early");
       if (plan) {
         await blocked(plan.trace);
+        if (plan.flagReason && input.routingV2Backfill?.mode === "classify_only") {
+          // Classify-only never writes a hold: a flagging gate skips the text (counted).
+          return { ok: false, outcome: { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE } };
+        }
         if (plan.flagReason) {
           const flagged = await markPropertyNeedsAttention(
             supabase,
@@ -450,7 +789,32 @@ export async function checkAiResponderDispatchPreGates(
   }
 
   await trace(supabase, { kind: "gate", name: "pre_gates", result: "pass" }, runCtx);
-  return { ok: true, property };
+  return routingV2Live ? { ok: true, property, routingV2Live } : { ok: true, property };
+}
+
+/**
+ * True when this inbound is a seller's answer to our number-source reply: the
+ * latest outbound message is that reply (`reply_key`, so this works whatever
+ * reason the property is held for) and it was not sent in answer to THIS inbound
+ * (a replay of the original question is not an answer). Fails closed (false).
+ */
+async function isAnswerToNumberSourceReply(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("metadata")
+    .eq("property_id", input.propertyId)
+    .eq("direction", "outbound")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return false;
+  const meta = (data.metadata ?? {}) as { reply_key?: unknown; inbound_message_id?: unknown };
+  if (meta.reply_key !== NUMBER_SOURCE_REPLY_KEY) return false;
+  if (input.inboundMessageId && meta.inbound_message_id === input.inboundMessageId) return false;
+  return true;
 }
 
 export async function dispatchAiResponse(
@@ -474,6 +838,17 @@ export async function dispatchAiResponse(
   return result;
 }
 
+export const NINE_CLOSE_WRONG_PERSON_CONTEXT_CHANGED = "nine_close_wrong_person_context_changed";
+
+/**
+ * The revision a wrong-person close may act on after our own reply: the evaluation
+ * revision plus the one bump our outbound SMS causes. Anything else moved = null (abort).
+ */
+export function wrongPersonCloseRevision(evaluationRevision: number, currentRevision: number): number | null {
+  const expected = evaluationRevision + 1;
+  return currentRevision === expected ? expected : null;
+}
+
 async function dispatchAiResponseCore(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
@@ -488,6 +863,18 @@ async function dispatchAiResponseCore(
   });
   if (!preGates.ok) return preGates.outcome;
   const { property } = preGates;
+  // Routing v2 backfill: only the v2 engine may handle an old text. v2 not live for this text
+  // right now (flags / canary / engine re-read per text, so a mid-run kill switch is honoured)
+  // = skipped and counted; never the legacy engine, never a reply or a drip (Opus review B2).
+  if (input.routingV2Backfill && !preGates.routingV2Live) {
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_V2_NOT_LIVE };
+  }
+  // Newest-inbound fence (Astra review 2b-2): before the keyword branch and everything after it,
+  // an older backfill text never acts once a newer seller text exists (any mode).
+  if (input.routingV2Backfill && input.inboundMessageId
+      && (await backfillNewerInboundExists(supabase, input.propertyId, input.inboundMessageId)) !== "no") {
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_NEWER_INBOUND };
+  }
 
   const { data: config } = await supabase
     .from("ai_responder_configs")
@@ -497,6 +884,28 @@ async function dispatchAiResponseCore(
     .eq("org_id", property.org_id)
     .eq("active", true)
     .maybeSingle();
+
+  // Messages v2 PR 3: the org's engine, read ONCE per inbound and carried on `config`.
+  // Only a missing engine column (a database before the migration) falls back to the
+  // eight-answer engine; any other read problem is `unreadable` and holds.
+  const engineRead =
+    config?.classifier_provider === "jev" ? await readClassifierEngine(supabase, property.org_id) : "outcome_v1";
+  // A responder-off property (a person's takeover switch) is checked FIRST: it runs no
+  // engine and writes no hold either way, so an unreadable switch there changes nothing
+  // (it falls through to the silent responder-off skip below).
+  // Routing v2 backfill: the config read here (the one every later branch uses) must itself say
+  // Jev automatic + nine questions, or the text is skipped. Closes the gap between the pre-gate's
+  // live read and this one (a flip in between can never route a backfill text to another engine).
+  if (input.routingV2Backfill && !(config?.classifier_provider === "jev" && config.classifier_mode === "automatic" && engineRead === "nine_questions")) {
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_V2_NOT_LIVE };
+  }
+  if (engineRead === "unreadable" && property.ai_responder_disabled !== true) {
+    // The switch state is unknown: run neither engine, a person looks (not a hot hold).
+    await markPropertyNeedsAttention(supabase, input.propertyId, CLASSIFIER_ENGINE_UNREADABLE, deps.runContext);
+    return { outcome: "escalated", reason: CLASSIFIER_ENGINE_UNREADABLE };
+  }
+  const classifierEngine = engineRead === "unreadable" ? "outcome_v1" : engineRead;
+  if (config) (config as { classifier_engine?: string }).classifier_engine = classifierEngine;
 
   if (deps.runContext) {
     await updateRun(supabase, deps.runContext, {
@@ -524,15 +933,73 @@ async function dispatchAiResponseCore(
   //    signal on lead detail regardless). If no config and no match,
   //    we'll skip below.
   // --------------------------------------------------------------------------
-  const keywordEscalation = await applyKeywordEscalation(supabase, {
-    propertyId: input.propertyId,
-    inboundBody: input.inboundBody,
-    escalationKeywords: config?.escalation_keywords ?? null,
-    runContext: deps.runContext,
-  });
+  // PR 2: with Jev automatic, the price_offer keyword is NOT a hot flag on its
+  // own here. It is decided after the consent / suppression gates and the
+  // classification, by the shared hot decision, so "STOP texting me, what's
+  // your price" stays an opt-out (stop / DNC / wrong / bad number win).
+  const deferPriceKeyword =
+    !!config && config.active === true && isJevAutomatic(config) &&
+    isPriceKeyword(input.inboundBody, config.escalation_keywords) &&
+    // A text that ALSO carries a non-price signal (died, lawyer, "real person")
+    // keeps main's up-front hold so a person always sees it.
+    !hasNonPriceEscalationPhrase(input.inboundBody, { allowedPhrases: config.escalation_keywords ?? undefined });
+  if (deferPriceKeyword) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "pass",
+      detail: { tier: HOT_KEYWORD_TIER, deferred: "shared_hot_decision" },
+    }, deps.runContext);
+  }
+  // PR 2: a person turned the responder OFF for this property (their
+  // takeover switch): Sandra writes no keyword hold and sends no alert,
+  // whatever the phrase. Everything else (opted-out / DNC contacts, phone
+  // suppression, no active config) keeps main's behaviour: a keyword still
+  // writes its hold so a person sees it. Nothing is ever texted either way.
+  // (Held / human-takeover properties never reach this point.)
+  const keywordHit =
+    !deferPriceKeyword &&
+    matchEscalationKeyword(input.inboundBody, { allowedPhrases: config?.escalation_keywords ?? undefined }) !== null;
+  const keywordGated = keywordHit && property.ai_responder_disabled === true;
+  if (keywordGated) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "skipped",
+      detail: { why: "disabled_per_property" },
+    }, deps.runContext);
+  }
+  if (keywordHit && !keywordGated && input.routingV2Backfill?.mode === "classify_only") {
+    // Classify-only (enforced here, with the keywords just read): the up-front keyword hold is a
+    // side effect, so the text is skipped and counted instead (Astra review 1).
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_KEYWORD_HOLD };
+  }
+  const keywordEscalation = deferPriceKeyword || keywordGated
+    ? ({ escalated: false } as const)
+    : await applyKeywordEscalation(supabase, {
+        propertyId: input.propertyId,
+        inboundBody: input.inboundBody,
+        escalationKeywords: config?.escalation_keywords ?? null,
+        runContext: deps.runContext,
+        jevAutomatic: !!config && config.active === true && isJevAutomatic(config),
+        inboundMessageId: input.inboundMessageId ?? null,
+        orgId: property.org_id,
+      });
 
   if (keywordEscalation.escalated) {
-    return { outcome: "escalated", reason: keywordEscalation.reason };
+    // The up-front hold keeps main's (non-price) reason so a person sees it.
+    // If the text ALSO carries an allowed price signal, the lead is now held:
+    // run the held-lead classify-only check, which alerts Jarrad once only if
+    // stop / DNC / wrong / bad number does not win (and its own gates pass).
+    // A backfill text never reaches the legacy classifier: the keyword hold stands for a person.
+    if (!input.routingV2Backfill) {
+      await checkHotTextAfterKeywordHold(supabase, input, keywordEscalation.reason, config?.escalation_keywords ?? null, deps.runContext, property);
+    }
+    const escalatedOutcome: AiDispatchOutcome = { outcome: "escalated", reason: keywordEscalation.reason };
+    // Stress F8/F9 (round 17): a hold that did not land is never recorded as handled (claim
+    // flag_failed); it already failed closed (drips paused, replies cancelled, safety marker).
+    if (!keywordEscalation.flagOk) markFlagFailed(escalatedOutcome);
+    return escalatedOutcome;
   }
 
   // --------------------------------------------------------------------------
@@ -547,6 +1014,9 @@ async function dispatchAiResponseCore(
     input.contactId,
     input.conversationId ?? null,
   );
+  if ((countedTurns === null || consentState === null) && input.routingV2Backfill?.mode === "classify_only") {
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE };
+  }
   if (countedTurns === null || consentState === null) {
     // Rule 7: a gate that cannot be evaluated never passes. No reply exists
     // yet (nothing to dead-letter), so flag a human with `send_check_failed`.
@@ -626,6 +1096,7 @@ async function dispatchAiResponseCore(
         config,
         currentTurn,
         deps.runContext,
+        decision.reason,
       );
       if (outcome) return outcome;
       // use_legacy — Jev had nothing actionable to apply (jev_no_action
@@ -638,7 +1109,8 @@ async function dispatchAiResponseCore(
     return silentSkip(decision.reason, 0);
   }
 
-  if (input.conversationId) {
+  // Stress review A-2: the 45 s reply throttle never parks a v2 reply (see the pre-gates).
+  if (input.conversationId && !preGates.routingV2Live) {
     const recentReply = await findRecentAiReplyInThread(
       supabase,
       input.conversationId,
@@ -720,6 +1192,8 @@ async function dispatchAiResponseCore(
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
+    // Classify-only never takes the live responder claim (Astra 3rd pass, 3): its own key.
+    ...(input.routingV2Backfill?.mode === "classify_only" ? { responseKind: ROUTING_V2_BACKFILL_CLASSIFY_RESPONSE_KIND } : {}),
     inboundMessageId: input.inboundMessageId,
     propertyId: input.propertyId,
     contactId: input.contactId,
@@ -737,8 +1211,131 @@ async function dispatchAiResponseCore(
   // the existing opt-out path untouched. The identity shortcut is skipped so
   // an automated "who is this" answer can never go to a hostile seller.
   const hostileInbound = isHostileInbound(input.inboundBody);
+  // Messages v2 PR 3: with the nine questions on, "who is this" is one of Jev's nine
+  // answers (and ranks BELOW stop / wrong person / price in the approved order), so
+  // the wording shortcut must not answer first. Any read failure = the old engine.
+  const nineEngineOn = classifierEngine === "nine_questions" && config?.classifier_mode === "automatic";
 
-  if (!hostileInbound && isIdentityQuestion(input.inboundBody)) {
+  // PR 2: a hot seller never gets an automatic text. "Who is this? I might
+  // sell." would otherwise be answered by the identity shortcut before Jev
+  // runs; with Jev in automatic mode, classify first and let a hot decision
+  // take the hand-off path below (no reply) instead.
+  // ONE classification serves the identity decision AND the main path below
+  // (passed through as `precomputed`), so the two can never disagree. A
+  // classifier failure fails closed: no identity text; the main path holds.
+  // With the nine questions on (automatic) the wording shortcut never runs, and neither does
+  // the eight-answer pre-classification it would need. A price-keyword text never takes the
+  // identity shortcut (it goes to the shared hot decision instead).
+  const identityQuestion = !hostileInbound && !nineEngineOn && !deferPriceKeyword && isIdentityQuestion(input.inboundBody);
+  const identityClassification = identityQuestion && config && isJevAutomatic(config)
+    ? await classifyInboundOnce(supabase, { input, orgId: property.org_id, runCtx: deps.runContext })
+    : null;
+  const identityHot = identityClassification !== null && (
+    identityClassification.kind === "jev_automatic_failed" ||
+    (await isHotRouting(supabase, property.org_id, identityClassification, input.inboundBody, config?.escalation_keywords ?? null))
+  );
+  if (identityHot) {
+    await trace(supabase, {
+      kind: "action",
+      name: "identity_reply",
+      result: "skipped",
+      detail: { why: identityClassification?.kind === "jev_automatic_failed" ? "classifier_failed" : "hot_seller" },
+    }, deps.runContext);
+  }
+
+  if (identityQuestion && !identityHot) {
+    // "Who is this?" that is ALSO "how did you get my number?": send only the
+    // approved number-source template (it identifies the context) and skip the
+    // identity reply, so the seller gets ONE message. Needs the classifier, so
+    // it is attempted only when an approved template is mapped; every other
+    // case (and any failure) falls through to the identity reply below.
+    const identityLookup = await resolveNumberSourceForIdentity(supabase, {
+      input,
+      orgId: property.org_id,
+      config: config!,
+      runCtx: deps.runContext,
+      precomputed: identityClassification,
+    });
+    // The randomized reply delay was bypassed: an approved template is never sent
+    // instantly, so the number-source reply is dropped and a person is told.
+    const identityDelayDrop = identityLookup.template && input.replyDelayBypassed
+      ? (input.replyDelayBypassReason ?? "delay_unavailable")
+      : null;
+    const numberSource = identityDelayDrop ? null : identityLookup.template;
+    const identityNotSentReason = identityDelayDrop ?? identityLookup.askedNotSentReason;
+    if (numberSource) {
+      const nsRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, numberSource.templateId, numberSource.body);
+      if (nsRepeat !== "no") {
+        return holdRepeatedReply(supabase, {
+          input,
+          claimId: responseClaim.claimId,
+          holdReason: `${NUMBER_SOURCE_NOT_SENT_PREFIX}${TEMPLATE_ALREADY_SENT}`,
+          lookup: nsRepeat,
+          detail: { templateId: numberSource.templateId, mappingId: numberSource.mappingId, replyKey: numberSource.key, via: "identity_interceptor" },
+          runCtx: deps.runContext,
+        });
+      }
+      const sent = await sendResponderMessage(supabase, {
+        runContext: deps.runContext,
+        input,
+        body: numberSource.body,
+        model: config!.model,
+        confidence: numberSource.nativeConfidence ?? 1,
+        sentiment: "neutral",
+        turn: currentTurn + 1,
+        source: "approved_template",
+        templateId: numberSource.templateId,
+        templateSource: numberSource.source,
+        replyKey: NUMBER_SOURCE_REPLY_KEY,
+        orgId: property.org_id,
+        claimStartedAt,
+        outboundMode: config!.outbound_mode,
+        replyKind: "send_reply",
+      });
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result:
+          sent.outcome === "sent"
+            ? "sent"
+            : sent.outcome === "skipped"
+              ? "skipped"
+              : sent.outcome === "retry"
+                ? "block"
+                : "held",
+        detail: {
+          templateId: numberSource.templateId,
+          mappingId: numberSource.mappingId,
+          outcome: numberSource.outcome,
+          replyKey: numberSource.key,
+          via: "identity_interceptor",
+          sendOutcome: sent.outcome,
+        },
+      }, deps.runContext);
+      // A contended send drops its carried reply so the re-dispatch classifies again and
+      // re-runs the template path (a carried reply would go out as a plain LLM reply,
+      // without the approval re-check, reply_key or the awaiting-answer hold).
+      const settledNumberSource = await settleClaimForSendOutcome(supabase, responseClaim.claimId, sent.outcome === "retry" ? { ...sent, reply: undefined } : sent, {
+        orgId: property.org_id,
+        input,
+        body: numberSource.body,
+        runContext: deps.runContext,
+      });
+      // The reply asks "want me to take you off the list?": a person must see the answer.
+      if (sent.outcome === "sent") {
+        await holdWithRetry(supabase, input.propertyId, NUMBER_SOURCE_AWAITING_ANSWER_REASON, deps.runContext);
+      } else if (sent.outcome !== "retry") {
+        // Refused at the final fence (approval changed, recipient window) or held by the send
+        // path: nobody answered the question, so a person is told (first flag wins).
+        await holdWithRetry(
+          supabase,
+          input.propertyId,
+          `${NUMBER_SOURCE_NOT_SENT_PREFIX}send_${sent.outcome}`,
+          deps.runContext,
+        );
+      }
+      return settledNumberSource;
+    }
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) {
       const reason = `safety:${safety.reason}`;
@@ -755,6 +1352,17 @@ async function dispatchAiResponseCore(
         flagOk: flagOk1,
       });
       return { outcome: "escalated", reason };
+    }
+    const identityRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, null, IDENTITY_REPLY_BODY);
+    if (identityRepeat !== "no") {
+      return holdRepeatedReply(supabase, {
+        input,
+        claimId: responseClaim.claimId,
+        holdReason: TEMPLATE_ALREADY_SENT_HOLD,
+        lookup: identityRepeat,
+        detail: { replyKind: "identity" },
+        runCtx: deps.runContext,
+      });
     }
     const outcome = await sendResponderMessage(supabase, {
       runContext: deps.runContext,
@@ -773,12 +1381,23 @@ async function dispatchAiResponseCore(
       outboundMode: config!.outbound_mode,
       replyKind: "identity",
     });
-    return settleClaimForSendOutcome(supabase, responseClaim.claimId, outcome, {
+    const settledIdentity = await settleClaimForSendOutcome(supabase, responseClaim.claimId, outcome, {
       orgId: property.org_id,
       input,
       body: IDENTITY_REPLY_BODY,
       runContext: deps.runContext,
     });
+    // The seller also asked how we got the number but that reply did not go
+    // out: the identity copy does not answer it, so a person looks.
+    if (identityNotSentReason) {
+      await holdWithRetry(
+        supabase,
+        input.propertyId,
+        `${NUMBER_SOURCE_NOT_SENT_PREFIX}${identityNotSentReason}`,
+        deps.runContext,
+      );
+    }
+    return settledIdentity;
   }
 
   // A retry with no carried reply (it waited at the gate before generating)
@@ -818,6 +1437,7 @@ async function dispatchAiResponseCore(
     responseClaim,
     deps.runContext,
     templateCtx,
+    identityClassification,
   );
   if (classificationResult.handled) return classificationResult.outcome;
   const classification = classificationResult.classification;
@@ -874,6 +1494,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
   config: {
     classifier_provider?: string | null;
     classifier_mode?: string | null;
+    classifier_engine?: string | null;
     model: string;
     system_prompt: string;
     min_confidence: number;
@@ -881,10 +1502,14 @@ async function classifyAndApplyDespiteReplyIneligibility(
   },
   currentTurn: number,
   runCtx?: MaybeRunContext,
+  /** Why no reply may be sent (the skip classifier's reason), e.g. `outside_business_hours`. */
+  replyIneligibleReason?: string,
 ): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
+    // Classify-only never takes the live responder claim (Astra 3rd pass, 3): its own key.
+    ...(input.routingV2Backfill?.mode === "classify_only" ? { responseKind: ROUTING_V2_BACKFILL_CLASSIFY_RESPONSE_KIND } : {}),
     inboundMessageId: input.inboundMessageId,
     propertyId: input.propertyId,
     contactId: input.contactId,
@@ -902,6 +1527,9 @@ async function classifyAndApplyDespiteReplyIneligibility(
     config,
     responseClaim,
     runCtx,
+    undefined,
+    undefined,
+    replyIneligibleReason,
   );
   if (classificationResult.handled) return classificationResult.outcome;
   const classification = classificationResult.classification;
@@ -969,6 +1597,7 @@ async function classifyAndHandleNonRouteOutcomes(
     | {
         classifier_provider?: string | null;
         classifier_mode?: string | null;
+        classifier_engine?: string | null;
         escalation_keywords?: ReadonlyArray<string> | null;
       }
     | null
@@ -977,11 +1606,76 @@ async function classifyAndHandleNonRouteOutcomes(
   runCtx?: MaybeRunContext,
   /** Present only on the reply-eligible path: absent = no template step. */
   templateCtx?: TemplateStepContext,
+  /** The identity check's classification of this same inbound: reused, never recomputed. */
+  precomputed?: ClassificationBridgeResult | null,
+  /** Reply-ineligible path only: why no reply may be sent now. */
+  replyIneligibleReason?: string,
 ): Promise<
   | { handled: true; outcome: AiDispatchOutcome | AiRetryOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
 > {
-  const classification = await classifyForDispatch(
+  // Messages v2 PR 3: per-org engine switch (default outcome_v1 = today's path).
+  if (config?.classifier_provider === "jev" && config.classifier_engine === "nine_questions") {
+    if (config.classifier_mode === "automatic") {
+      // Routing v2 cutover: an eligible property (questions_live + canary) runs the v2 engine
+      // instead. Flag off / not eligible / unreadable flags = null = today's nine-question step.
+      const v2 = await runRoutingV2LiveStep(supabase, {
+        input,
+        property,
+        claim: responseClaim,
+        runCtx,
+        templateCtx,
+        escalationKeywords: config.escalation_keywords ?? null,
+        ...(replyIneligibleReason ? { replyIneligibleReason } : {}),
+      });
+      if (v2) return { handled: true, outcome: v2 };
+      if (input.routingV2Backfill) {
+        // The v2 step declined after the pre-gate said live (a flag flip / read error in between).
+        await completeClaim(supabase, input.propertyId, { claimId: responseClaim.claimId, outcome: ROUTING_V2_BACKFILL_V2_NOT_LIVE });
+        return { handled: true, outcome: { outcome: "skipped", reason: ROUTING_V2_BACKFILL_V2_NOT_LIVE } };
+      }
+      // Opus review of 93a8070932bd (B1): a lead still held here got past the early gate only
+      // because an older mechanics hold yields on the v2 road; if v2 did not take it after all,
+      // the legacy engine must not answer a held lead.
+      if (property.needs_human_attention) return { handled: true, outcome: silentSkip("already_terminal", 0) };
+      return {
+        handled: true,
+        outcome: await runNineQuestionsStep(supabase, {
+          input,
+          property,
+          claim: responseClaim,
+          runCtx,
+          templateCtx,
+          escalationKeywords: config.escalation_keywords ?? null,
+          ...(replyIneligibleReason ? { replyIneligibleReason } : {}),
+        }),
+      };
+    }
+    // Shadow: the decision is recorded for comparison; the eight-answer path still acts.
+    const shadow = await runNineClassification(
+      supabase,
+      {
+        orgId: property.org_id,
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
+        inboundBody: input.inboundBody,
+      },
+      { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx, shadow: true },
+    );
+    if (shadow.kind === "ok") {
+      await trace(supabase, {
+        kind: "shadow",
+        name: "would_apply",
+        result: "would_apply",
+        detail: { shadow_engine: "nine_questions", answer: shadow.result.answer },
+      }, runCtx);
+    }
+  }
+  // `precomputed` is only ever set on the eight-answer path (the nine engine skips the identity
+  // pre-classification), so the nine branch above never consumes it.
+  const classification = precomputed ?? await classifyForDispatch(
     supabase,
     {
       orgId: property.org_id,
@@ -1001,6 +1695,60 @@ async function classifyAndHandleNonRouteOutcomes(
       runContext: runCtx,
     },
   );
+
+  // PR 2: hot wins. One shared routing decision right after classification,
+  // before any reply, drip or disposition: a nurture / not-interested result
+  // that also says "price or offer" / "call me" is a hot seller. It is held
+  // for Jarrad (hot hold → one Slack + one text); no reply, no disposition.
+  // new_lead promotions and escalations keep their own hot paths.
+  // The deferred price_offer keyword (Jev automatic): hot unless stop / DNC /
+  // wrong / bad number won; a promotion or a hot escalate route keeps its own
+  // hot path. If Jev failed, the keyword alone marks hot (alert only).
+  const priceKeyword =
+    !!config && isJevAutomatic(config) &&
+    isPriceKeyword(input.inboundBody, config.escalation_keywords);
+  if (
+    priceKeyword &&
+    classification.kind !== "jev_promote_new_lead" &&
+    !(classification.kind === "jev_route" && classification.route.kind === "escalate") &&
+    !stopOrDncWins(classification) &&
+    !hotWinsOver(classification)
+  ) {
+    const keywordReason = `keyword:${HOT_KEYWORD_TIER}`;
+    await trace(supabase, {
+      kind: "hold",
+      name: "hot_wins",
+      result: "held",
+      detail: { kind: classification.kind, keyword: HOT_KEYWORD_TIER },
+    }, runCtx);
+    const kwFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, keywordReason, runCtx);
+    await completeClaim(supabase, input.propertyId, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+      flagOk: kwFlagOk,
+    });
+    return { handled: true, outcome: { outcome: "escalated", reason: keywordReason } };
+  }
+
+  // Hot wins ONLY over nurture and not-interested (at or below their cutoff).
+  // Stop / DNC / wrong-number always beat hot (Jarrad's approved order puts
+  // "asked to stop" above "talked price"): their human review paths run.
+  if (hotWinsOver(classification)) {
+    const hotReason = `model:${(classification as { escalationReason?: string | null }).escalationReason}`;
+    await trace(supabase, {
+      kind: "hold",
+      name: "hot_wins",
+      result: "held",
+      detail: { kind: classification.kind, escalation: (classification as { escalationReason?: string | null }).escalationReason ?? null },
+    }, runCtx);
+    const hotFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, hotReason, runCtx);
+    await completeClaim(supabase, input.propertyId, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+      flagOk: hotFlagOk,
+    });
+    return { handled: true, outcome: { outcome: "escalated", reason: hotReason } };
+  }
 
   // Luna fallback SUGGESTION for a below-threshold hold. Fire-and-forget after
   // the response: it never delays or blocks this pipeline, never applies
@@ -1038,7 +1786,77 @@ async function classifyAndHandleNonRouteOutcomes(
     // Approved-template reply first (Phase 4): nurture is a human-owned
     // disposition that suppresses automated sends, so the reply must go out
     // before the outcome is applied.
+    //
+    // Nurture auto-drip (per-org switch, default off). When on, the approved
+    // routing runs on Jev's timeframe / listing answers: "ready within 30 days"
+    // is a hot lead for a person, so it gets no nurture reply and no drip.
+    const dripCfg = await loadNurtureAutoDripConfig(supabase, property.org_id);
+    const dripRoute: NurtureRoute | null = dripCfg.enabled
+      ? routeNurture({
+          readyTimeframe: classification.readyTimeframe,
+          listingStatus: classification.listingStatus,
+        })
+      : null;
+    if (dripRoute?.kind === "person") {
+      if (input.inboundMessageId) {
+        await proposeJevLeadDecision(supabase, {
+          propertyId: input.propertyId,
+          conversationId: input.conversationId,
+          inboundMessageId: input.inboundMessageId,
+          classificationRunId: classification.classificationRunId,
+          outcome: "new_lead",
+          nativeConfidence: classification.nativeConfidence,
+          thresholdAtDecision: classification.thresholdAtDecision,
+          thresholdVersion: classification.thresholdVersion,
+          expectedRevision: classification.evaluationRevision,
+        });
+      }
+      await trace(supabase, {
+        kind: "hold",
+        name: "nurture_ready_within_30_days",
+        result: "held",
+        detail: { reason: "hot_lead", readyTimeframe: classification.readyTimeframe ?? null },
+      }, runCtx);
+      const hotFlagOk = await markPropertyNeedsAttention(supabase, input.propertyId, "hot_lead", runCtx);
+      // Also start the Book appointment drip (no nurture reply, no dispo change,
+      // no extra delay beyond the drip's own first step). It pauses on the
+      // seller's reply and when a person takes over; a failure here never
+      // undoes the hold.
+      if (classification.askedHowNumberObtained) {
+        // The seller also asked how we got their number and no reply goes out: a person
+        // answers, so nothing is enrolled in a drip.
+        await trace(supabase, {
+          kind: "action",
+          name: "drip_enrolled",
+          result: "skipped",
+          detail: { why: "number_source_asked", route: "hot_book_appointment" },
+        }, runCtx);
+      } else {
+        // PR 2: a hot seller is handed to Jarrad (hot hold → one Slack + one
+        // text); Sandra never starts a seller-facing drip for them.
+        await trace(supabase, {
+          kind: "action",
+          name: "drip_enrolled",
+          result: "skipped",
+          detail: { why: "hot_seller_no_drip", route: "hot_book_appointment" },
+        }, runCtx);
+      }
+      await completeClaim(supabase, input.propertyId, {
+        claimId: responseClaim.claimId,
+        outcome: "escalated",
+        flagOk: hotFlagOk,
+      });
+      return { handled: true, outcome: { outcome: "escalated", reason: "hot_lead" } };
+    }
     let templateMessageId: string | null = null;
+    let numberSourceHold: string | null = null;
+    let templateReplyKey: TemplateReplyKey | null = null;
+    // Why no nurture reply went out (drip enrolment needs the nurture reply first).
+    let templateNotSentReason: string | null = !templateCtx
+      ? "no_reply_path"
+      : templateCtx.hostile
+        ? "hostile"
+        : null;
     if (templateCtx && !templateCtx.hostile) {
       const step = await runApprovedTemplateStep(supabase, {
         input,
@@ -1048,11 +1866,23 @@ async function classifyAndHandleNonRouteOutcomes(
         outcome: "nurture",
         nativeConfidence: classification.nativeConfidence,
         escalationReason: classification.escalationReason,
+        askedHowNumberObtained: classification.askedHowNumberObtained,
         runCtx,
       });
       if (step.kind === "stop") return { handled: true, outcome: step.outcome };
       templateMessageId = step.outboundMessageId;
+      numberSourceHold = step.hold;
+      templateReplyKey = step.replyKey;
+      templateNotSentReason = step.outboundMessageId ? null : (step.notSentReason ?? "not_sent");
+    } else if (classification.askedHowNumberObtained) {
+      // Asked, but this dispatch cannot send replies at all.
+      numberSourceHold = `${NUMBER_SOURCE_NOT_SENT_PREFIX}reply_ineligible`;
     }
+    // True when there is nothing to hold or the hold is persisted. A hold that could not be
+    // written completes the claim as error `flag_failed` (not handled) so it is recoverable:
+    // the claim keeps the sent template's id, so a re-dispatch never sends it twice.
+    const holdForNumberSource = async (): Promise<boolean> =>
+      numberSourceHold ? holdWithRetry(supabase, input.propertyId, numberSourceHold, runCtx) : true;
     const applyResult = await applyJevLeadDecisionAtomically(supabase, {
       propertyId: input.propertyId,
       conversationId: input.conversationId,
@@ -1083,9 +1913,27 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: null, to: "nurture", reason: "model:nurture" },
         });
       }
+      // Applied first, then held: a flagged property would make the outcome write skip.
+      const holdOk = await holdForNumberSource();
+      // Strictly AFTER the nurture reply was accepted and the outcome applied. Only the
+      // nurture reply itself starts a drip: when the number-source reply replaced it
+      // (or was asked for and could not go out) the seller is waiting on a person, so
+      // nothing is enrolled and no "nurture reply not sent" flag is raised.
+      if (!classification.askedHowNumberObtained) {
+        await runNurtureAutoDripStep(supabase, {
+          propertyId: input.propertyId,
+          contactId: input.contactId,
+          cfg: dripCfg,
+          route: dripRoute,
+          replySent: templateMessageId !== null && templateReplyKey === "nurture",
+          notSentReason: templateNotSentReason ?? "not_sent",
+          runCtx,
+        });
+      }
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: "auto_closed",
+        outcome: holdOk ? "auto_closed" : "escalated",
+        ...(holdOk ? {} : { flagOk: false }),
         ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:nurture" } };
@@ -1101,9 +1949,11 @@ async function classifyAndHandleNonRouteOutcomes(
       // already set (possibly by a human while Jev was classifying) —
       // nurture must never downgrade it. Skip silently, same treatment
       // as the legacy path's "already_terminal" RPC status.
+      const terminalHoldOk = await holdForNumberSource();
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: silentSkipClaimOutcome(0),
+        outcome: terminalHoldOk ? silentSkipClaimOutcome(0) : "escalated",
+        ...(terminalHoldOk ? {} : { flagOk: false }),
         ...(templateMessageId ? { outboundMessageId: templateMessageId } : {}),
       });
       return { handled: true, outcome: silentSkip("already_terminal", 0) };
@@ -1195,9 +2045,18 @@ async function classifyAndHandleNonRouteOutcomes(
           payload: { from: "prospect", to: "new_lead" },
         });
       }
+      // Hot seller (PR 2): the lead goes on My Leads under Jarrad (shared with the nine-question path).
+      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, responseClaim, runCtx, input.inboundMessageId);
+      if (handoffEscalation) return { handled: true, outcome: handoffEscalation };
+      const newLeadHoldOk = classification.askedHowNumberObtained
+        // A new lead never auto-replies (PLAN D5), so the number-source reply
+        // is not sent either; the lead's owner sees the question.
+        ? await holdWithRetry(supabase, input.propertyId, `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_new_lead`, runCtx)
+        : true;
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: "auto_closed",
+        outcome: newLeadHoldOk ? "auto_closed" : "escalated",
+        ...(newLeadHoldOk ? {} : { flagOk: false }),
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:new_lead_promoted" } };
     }
@@ -1212,7 +2071,11 @@ async function classifyAndHandleNonRouteOutcomes(
       result: "error",
       detail: { status: applyResult.status },
     }, runCtx);
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
+    let ourFlagAt: string | null = null;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx, NO_GUARD, (at) => {
+      ourFlagAt = at;
+    });
+    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason, ourFlagAt);
     await completeClaim(supabase, input.propertyId, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -1568,9 +2431,16 @@ async function resolveAndApplyRoute(
     }
     case "auto_close_wrong_number":
       let wrongNumberTemplateMessageId: string | null = null;
+      let wrongNumberStepHold: string | null = null;
+      // The seller asked how we got the number AND is the wrong contact: the
+      // wrong-number reply is not sent (it would not answer the question, and
+      // the number-source reply is never sent to a wrong contact); a person looks.
+      const wrongNumberNumberSourceAsked =
+        classification.kind === "jev_route" && classification.askedHowNumberObtained;
       if (
         templateCtx &&
         !templateCtx.hostile &&
+        !wrongNumberNumberSourceAsked &&
         classification.kind === "jev_route" &&
         classification.eligibleForAutoAccept &&
         classification.wrongScope === "this_property"
@@ -1592,6 +2462,7 @@ async function resolveAndApplyRoute(
         });
         if (step.kind === "stop") return step.outcome;
         wrongNumberTemplateMessageId = step.outboundMessageId;
+        wrongNumberStepHold = step.hold;
       }
       const isJevBelowThresholdWrongNumber = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const wrongNumberResult = isJevBelowThresholdWrongNumber
@@ -1640,15 +2511,24 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
+      const wrongNumberHoldReason = wrongNumberNumberSourceAsked
+        ? `${NUMBER_SOURCE_NOT_SENT_PREFIX}outcome_wrong_number`
+        : wrongNumberStepHold;
+      const wrongNumberHoldOk = wrongNumberHoldReason
+        ? await holdWithRetry(supabase, input.propertyId, wrongNumberHoldReason, runCtx)
+        : true;
+      const wrongNumberClaimError = dispositionClaimError(wrongNumberResult);
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: claimOutcomeOf(wrongNumberOutcome),
-        errorMessage: dispositionClaimError(wrongNumberResult),
+        outcome: wrongNumberHoldOk || wrongNumberClaimError ? claimOutcomeOf(wrongNumberOutcome) : "escalated",
+        ...(wrongNumberHoldOk ? {} : { flagOk: false }),
+        errorMessage: wrongNumberClaimError,
         ...(wrongNumberTemplateMessageId ? { outboundMessageId: wrongNumberTemplateMessageId } : {}),
       });
       return wrongNumberOutcome;
     case "auto_close":
       let autoCloseTemplateMessageId: string | null = null;
+      let autoCloseNumberSourceHold: string | null = null;
       if (
         classification.kind === "jev_route" &&
         classification.eligibleForAutoAccept &&
@@ -1693,10 +2573,18 @@ async function resolveAndApplyRoute(
           outcome: "not_interested",
           nativeConfidence: classification.nativeConfidence,
           escalationReason: classification.escalationReason,
+          askedHowNumberObtained: classification.askedHowNumberObtained,
           runCtx,
         });
         if (step.kind === "stop") return step.outcome;
         autoCloseTemplateMessageId = step.outboundMessageId;
+        autoCloseNumberSourceHold = step.hold;
+      } else if (classification.kind === "jev_route" && classification.askedHowNumberObtained) {
+        // Asked, but no reply goes out here: below its cutoff, a hostile
+        // inbound, or a dispatch that cannot send replies.
+        autoCloseNumberSourceHold = `${NUMBER_SOURCE_NOT_SENT_PREFIX}${
+          templateCtx?.hostile ? "hostile" : !templateCtx ? "reply_ineligible" : "below_cutoff"
+        }`;
       }
       const isJevBelowThresholdAutoClose = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const autoCloseResult = isJevBelowThresholdAutoClose
@@ -1737,10 +2625,15 @@ async function resolveAndApplyRoute(
           jevAutoAccept.classificationRunId,
         );
       }
+      const autoCloseHoldOk = autoCloseNumberSourceHold
+        ? await holdWithRetry(supabase, input.propertyId, autoCloseNumberSourceHold, runCtx)
+        : true;
+      const autoCloseClaimError = dispositionClaimError(autoCloseResult);
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
-        outcome: claimOutcomeOf(autoCloseOutcome),
-        errorMessage: dispositionClaimError(autoCloseResult),
+        outcome: autoCloseHoldOk || autoCloseClaimError ? claimOutcomeOf(autoCloseOutcome) : "escalated",
+        ...(autoCloseHoldOk ? {} : { flagOk: false }),
+        errorMessage: autoCloseClaimError,
         ...(autoCloseTemplateMessageId ? { outboundMessageId: autoCloseTemplateMessageId } : {}),
       });
       return autoCloseOutcome;
@@ -2060,6 +2953,8 @@ async function retryWithCarriedReply(
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
+    // Classify-only never takes the live responder claim (Astra 3rd pass, 3): its own key.
+    ...(input.routingV2Backfill?.mode === "classify_only" ? { responseKind: ROUTING_V2_BACKFILL_CLASSIFY_RESPONSE_KIND } : {}),
     inboundMessageId: input.inboundMessageId,
     propertyId: input.propertyId,
     contactId: input.contactId,
@@ -2257,13 +3152,19 @@ type TemplateStepContext = {
   hostile?: boolean;
 };
 
-type TemplateStepResult =
+export type TemplateStepResult =
   /**
    * Carry on with today's flow (apply the outcome); `outboundMessageId` when a
    * template went out. A template that was refused or held (quiet hours, hold
    * mode, any gate) also continues, with no message id: see the doc below.
+   * `replyKey` is the mapping key of the template that went out (`number_source`
+   * when it replaced the outcome's own reply), else null: anything that
+   * enrols a drip off this reply (nurture) must check `replyKey === "nurture"`.
+   * `hold` is a flag reason the caller sets AFTER the outcome is applied: the
+   * awaiting-answer hold when the number-source reply went out, or
+   * `number_source_reply_not_sent:<reason>` when the seller asked but it did not.
    */
-  | { kind: "continue"; outboundMessageId: string | null }
+  | { kind: "continue"; outboundMessageId: string | null; replyKey: TemplateReplyKey | null; hold: string | null; notSentReason?: string }
   /** A contended send was parked for retry: do NOT apply the outcome yet (the re-dispatch re-runs this step). */
   | { kind: "stop"; outcome: AiDispatchOutcome | AiRetryOutcome };
 
@@ -2309,7 +3210,88 @@ const TEMPLATE_QUIET_HOURS_RECIPIENT = "quiet_hours_recipient_at_send";
 /** Trace-only drop reason (not a hold/flag reason). */
 const TEMPLATE_DROP_DELAY_UNAVAILABLE = "delay_unavailable";
 
-async function runApprovedTemplateStep(
+/** Not-sent reason: this approved template (or its exact text) already went to this property. */
+export const TEMPLATE_ALREADY_SENT = "template_already_sent";
+/** A-2 C3: a v2 reply cancelled because our own older auto reply went out after its inbound. */
+export const V2_OLDER_AUTO_REPLY_SENT = "v2_older_auto_reply_sent";
+/** Hold written by the eight-answer path for a repeat (a known `reply_skipped:` reason). */
+const TEMPLATE_ALREADY_SENT_HOLD = `reply_skipped:${TEMPLATE_ALREADY_SENT}`;
+
+/**
+ * "yes" when an outbound on this property already carried this template id or this exact
+ * body, "no" when none did, "error" when either lookup failed (callers fail closed).
+ * A row that failed before reaching the provider (status failed, no external id) never
+ * went out and does not count; pending / unknown / sent rows do.
+ */
+/** The approved not-interested text went out to this property and the provider accepted it. */
+async function notInterestedReplyAccepted(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+): Promise<"yes" | "no" | "error"> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, status, external_id")
+    .eq("org_id", orgId)
+    .eq("property_id", propertyId)
+    .eq("direction", "outbound")
+    .eq("body", APPROVED_REPLY_TEXTS.not_interested);
+  if (error || !Array.isArray(data)) return "error";
+  return data.some((r) => !!r.external_id && (r.status === "sent" || r.status === "delivered")) ? "yes" : "no";
+}
+
+async function templateAlreadySentToProperty(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+  templateId: string | null,
+  body: string,
+): Promise<"yes" | "no" | "error"> {
+  const neverSent = (r: { status: string | null; external_id: string | null }) => r.status === "failed" && !r.external_id;
+  const base = () =>
+    supabase
+      .from("messages")
+      .select("id, status, external_id")
+      .eq("org_id", orgId)
+      .eq("property_id", propertyId)
+      .eq("direction", "outbound");
+  if (templateId) {
+    const byTemplate = await base().eq("metadata->>template_id", templateId);
+    if (byTemplate.error || !Array.isArray(byTemplate.data)) return "error";
+    if (byTemplate.data.some((r) => !neverSent(r))) return "yes";
+  }
+  const byBody = await base().eq("body", body);
+  if (byBody.error || !Array.isArray(byBody.data)) return "error";
+  return byBody.data.some((r) => !neverSent(r)) ? "yes" : "no";
+}
+
+/**
+ * A fixed reply (template or identity text) this property already received: send nothing,
+ * trace the skip, hold for a person, settle the claim as escalated.
+ */
+async function holdRepeatedReply(
+  supabase: SupabaseClient<Database>,
+  a: {
+    input: AiDispatchInput;
+    claimId: string | null;
+    holdReason: string;
+    lookup: "yes" | "error";
+    detail: Record<string, unknown>;
+    runCtx?: MaybeRunContext;
+  },
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "reply",
+    name: "template_reply",
+    result: "skipped",
+    detail: { ...a.detail, reason: TEMPLATE_ALREADY_SENT, ...(a.lookup === "error" ? { lookup: "failed" } : {}) },
+  }, a.runCtx);
+  const flagOk = await holdWithRetry(supabase, a.input.propertyId, a.holdReason, a.runCtx);
+  await completeClaim(supabase, a.input.propertyId, { claimId: a.claimId, outcome: "escalated", flagOk });
+  return { outcome: "escalated", reason: a.holdReason };
+}
+
+export async function runApprovedTemplateStep(
   supabase: SupabaseClient<Database>,
   a: {
     input: AiDispatchInput;
@@ -2320,23 +3302,55 @@ async function runApprovedTemplateStep(
     nativeConfidence: number | null;
     /** Jev's human-follow-up answer; only `not_applicable` allows a template. */
     escalationReason: JevEscalationReason | null;
+    /**
+     * Jev said the seller asked how we got their number. When true and an
+     * approved `number_source` template is mapped, THAT template is sent
+     * instead of the outcome's own (one reply, never two). Otherwise nothing
+     * changes.
+     */
+    askedHowNumberObtained?: boolean;
+    /** Messages v2 PR 3: decided by the nine questions (see resolveApprovedTemplateReply). */
+    decidedBy?: "nine_questions";
+    /**
+     * The exact approved text. When set, the final rendered body must equal it
+     * byte for byte or nothing is sent (`reply_text_not_approved`).
+     */
+    requiredBody?: string;
+    /**
+     * Nine-question reply_and_drip only: a refusal ONLY because a send window is closed
+     * (property quiet hours in the send pipeline, recipient window in the send path or at
+     * the provider fence) comes back as `skipped:${NINE_WINDOW_CLOSED}` with no flag or
+     * dead letter, so the caller can defer it. Florida cap / unknown state still hold.
+     */
+    windowDeferrable?: boolean;
     runCtx?: MaybeRunContext;
   },
 ): Promise<TemplateStepResult> {
   const { input, property, ctx, claim, runCtx } = a;
-  const resolved = await resolveApprovedTemplateReply(supabase, {
-    orgId: property.org_id,
-    propertyId: input.propertyId,
-    contactId: input.contactId,
-    outcome: a.outcome,
-    outcomeConfidence: a.nativeConfidence,
-    escalationReason: a.escalationReason,
-    // The responder does not ask Jev for a reply intent yet, so only
-    // any-intent mappings match until it does.
-    replyIntent: null,
-  });
+  const resolveFor = (mappingKey?: typeof NUMBER_SOURCE_REPLY_KEY) =>
+    resolveApprovedTemplateReply(supabase, {
+      orgId: property.org_id,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      outcome: a.outcome,
+      ...(mappingKey ? { mappingKey } : {}),
+      outcomeConfidence: a.nativeConfidence,
+      escalationReason: a.escalationReason,
+      // The responder does not ask Jev for a reply intent yet, so only
+      // any-intent mappings match until it does.
+      replyIntent: null,
+      ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
+    });
+  const asked = a.askedHowNumberObtained === true;
+  const notSent = (reason: string) => (asked ? `${NUMBER_SOURCE_NOT_SENT_PREFIX}${reason}` : null);
+  // When the seller asked how we got the number, the approved number-source
+  // reply is the ONLY template that may answer: if it cannot go out, the
+  // outcome's own template is NOT sent in its place (it would not answer the
+  // question); the caller holds the conversation for a person instead.
+  const resolved = asked ? await resolveFor(NUMBER_SOURCE_REPLY_KEY) : await resolveFor();
   if (resolved.kind === "none") {
     if (
+      asked ||
       resolved.reason === "human_follow_up" ||
       resolved.reason === "template_unavailable" ||
       resolved.reason === "render_failed" ||
@@ -2346,15 +3360,25 @@ async function runApprovedTemplateStep(
         kind: "reply",
         name: "template_reply",
         result: "skipped",
-        detail: { outcome: a.outcome, reason: resolved.reason },
+        detail: { outcome: a.outcome, reason: resolved.reason, ...(asked ? { replyKey: NUMBER_SOURCE_REPLY_KEY } : {}) },
       }, runCtx);
     }
-    return { kind: "continue", outboundMessageId: null };
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(resolved.reason), notSentReason: resolved.reason };
   }
 
+  if (a.requiredBody !== undefined && resolved.body !== a.requiredBody) {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: { outcome: a.outcome, templateId: resolved.templateId, mappingId: resolved.mappingId, reason: NINE_REPLY_TEXT_NOT_APPROVED },
+    }, runCtx);
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: null, notSentReason: NINE_REPLY_TEXT_NOT_APPROVED };
+  }
   // The randomized reply delay was bypassed (workflow could not start): never
   // send a template instantly. Drop it; the outcome still applies.
   if (input.replyDelayBypassed) {
+    const bypassReason = input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE;
     await trace(supabase, {
       kind: "reply",
       name: "template_reply",
@@ -2363,12 +3387,14 @@ async function runApprovedTemplateStep(
         outcome: a.outcome,
         templateId: resolved.templateId,
         mappingId: resolved.mappingId,
-        reason: input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE,
+        reason: bypassReason,
         disposition: "dropped_outcome_applies",
       },
     }, runCtx);
-    return { kind: "continue", outboundMessageId: null };
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(bypassReason), notSentReason: bypassReason };
   }
+  const replyKey: TemplateReplyKey = resolved.key ?? resolved.outcome;
+  const sentHold = replyKey === NUMBER_SOURCE_REPLY_KEY ? NUMBER_SOURCE_AWAITING_ANSWER_REASON : null;
 
   // Cannot send right now (owner's draft-only switch, or the recipient's clock /
   // Florida cap): DROP the template and carry on so the outcome applies (Q5/Q6).
@@ -2390,7 +3416,7 @@ async function runApprovedTemplateStep(
         disposition: "dropped_outcome_applies",
       },
     }, runCtx);
-    return { kind: "continue", outboundMessageId: null };
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(dropReason), notSentReason: dropReason };
   }
 
   // A crashed earlier run of this claim may already have sent the template:
@@ -2407,7 +3433,35 @@ async function runApprovedTemplateStep(
         templateId: resolved.templateId,
       },
     }, runCtx);
-    return { kind: "continue", outboundMessageId: alreadySent === "error" ? null : alreadySent };
+    return alreadySent === "error"
+      ? { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent("claim_unreadable"), notSentReason: "claim_unreadable" }
+      : { kind: "continue", outboundMessageId: alreadySent, replyKey, hold: sentHold };
+  }
+
+  // Never repeat an approved template on the same property (owner rule): when this
+  // template, or the same text, already went out here, nothing is sent and a person
+  // looks. An unreadable history fails closed the same way.
+  const repeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, resolved.templateId, resolved.body);
+  if (repeat !== "no") {
+    await trace(supabase, {
+      kind: "reply",
+      name: "template_reply",
+      result: "skipped",
+      detail: {
+        outcome: a.outcome,
+        templateId: resolved.templateId,
+        mappingId: resolved.mappingId,
+        reason: TEMPLATE_ALREADY_SENT,
+        ...(repeat === "error" ? { lookup: "failed" } : {}),
+      },
+    }, runCtx);
+    return {
+      kind: "continue",
+      outboundMessageId: null,
+      replyKey: null,
+      hold: notSent(TEMPLATE_ALREADY_SENT) ?? TEMPLATE_ALREADY_SENT_HOLD,
+      notSentReason: TEMPLATE_ALREADY_SENT,
+    };
   }
 
   let recorded = true;
@@ -2415,6 +3469,7 @@ async function runApprovedTemplateStep(
   const sent = await sendResponderMessage(supabase, {
     runContext: runCtx,
     input,
+    ...(a.windowDeferrable ? { windowDeferrable: true } : {}),
     body: resolved.body,
     model: ctx.model,
     confidence: a.nativeConfidence ?? 1,
@@ -2422,6 +3477,8 @@ async function runApprovedTemplateStep(
     turn: ctx.currentTurn + 1,
     source: "approved_template",
     templateId: resolved.templateId,
+    templateSource: resolved.source,
+    replyKey,
     orgId: property.org_id,
     claimStartedAt: ctx.claimStartedAt,
     outboundMode: ctx.outboundMode,
@@ -2451,6 +3508,7 @@ async function runApprovedTemplateStep(
     templateId: resolved.templateId,
     mappingId: resolved.mappingId,
     outcome: a.outcome,
+    ...(resolved.key === NUMBER_SOURCE_REPLY_KEY ? { replyKey: resolved.key } : {}),
     sendOutcome: sent.outcome,
     ...(sent.outcome === "sent" ? { outboundMessageId: sent.messageId } : {}),
     ...("reason" in sent && sent.reason ? { reason: sent.reason } : {}),
@@ -2473,11 +3531,14 @@ async function runApprovedTemplateStep(
     if (!recorded) {
       await markPropertyNeedsAttention(supabase, input.propertyId, "template_sent_outcome_missing", runCtx);
     }
-    return { kind: "continue", outboundMessageId: sent.messageId };
+    return { kind: "continue", outboundMessageId: sent.messageId, replyKey, hold: sentHold };
   }
   // Nothing was sent. Held (hold mode / recipient window / any gate) or
   // silently refused: the outcome still applies (see the doc above).
-  if (sent.outcome !== "retry") return { kind: "continue", outboundMessageId: null };
+  if (sent.outcome !== "retry") {
+    const why = ("reason" in sent && sent.reason ? `${sent.outcome}:${sent.reason}` : sent.outcome).replace(/\s+/g, "_");
+    return { kind: "continue", outboundMessageId: null, replyKey: null, hold: notSent(`send_${sent.outcome}`), notSentReason: why };
+  }
 
   // A retry drops its carried reply so the re-dispatch classifies again and
   // re-runs this step with the outcome still unapplied (a carried template
@@ -2491,6 +3552,496 @@ async function runApprovedTemplateStep(
       runContext: runCtx,
     }),
   };
+}
+
+/**
+ * Classify-only for an inbound on a property Sandra will not reply to: one that
+ * already needs a person, OR one with a human-owned disposition (nurture,
+ * callback_requested, booked_appointment) even when it is not flagged.
+ * True suppression (wrong_number, bad_number, dnc, opted_out) never gets here.
+ * With Jev automatic, one classification and the shared hot routing decision;
+ * hot → one hot_text event (alerted to Jarrad by the cron, whoever owns the
+ * lead, subject to the usual cover / cap / cutoff rules). Never sends, enrols,
+ * disposes or assigns. A failed write releases the claim; on a held lead the
+ * hold keeps a person in the loop, but on an UNFLAGGED lead nothing else
+ * records it, so it is only retried if the same inbound is replayed.
+ */
+async function classifyOnlyForHotText(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  property: GateProperty & { last_ai_escalation_reason?: string | null },
+  runCtx: MaybeRunContext,
+  opts: { holdFailed?: boolean } = {},
+): Promise<void> {
+  const orgId = property.org_id;
+  try {
+    // A person took over the thread: Sandra stays out.
+    if (property.last_ai_escalation_reason === "rep_sms_human_takeover") return;
+    // The same rule-0 gates as any send (org off, consent / opt-out, DNC,
+    // phone suppression, responder disabled = human takeover), evaluated as
+    // if the lead were not held. Any failed lookup or any gate → nothing.
+    // Alert-only (nothing is sent), so only TRUE suppression blocks it
+    // (wrong_number / bad_number / dnc / opted_out dispositions); human-owned
+    // dispositions (nurture, callback, booked) do not. A rep's lead still
+    // alerts Jarrad (owner decision 2026-10-19); the assignment is untouched.
+    if (isSuppressed({ outreachDispo: property.outreach_dispo })) return;
+    const silent = await loadSilentExit(supabase, input, { ...property, needs_human_attention: false, outreach_dispo: null });
+    if (!silent.ok || silent.reason) return;
+    // Already handled: a response claim or a classification run for this
+    // inbound means it went through before. Never classify a replay; a failed
+    // lookup fails closed.
+    const inboundId = input.inboundMessageId as string;
+    // No conversation: nothing reliable to classify against.
+    if (!input.conversationId) return;
+    const { data: claim, error: claimError } = await supabase
+      .from("ai_response_claims")
+      .select("id, status, lease_expires_at, outcome, error_message")
+      .eq("inbound_message_id", inboundId)
+      // Only the live responder claim: a routing v2 backfill claim (classify-only's own key, or a
+      // moved-aside backfill_prior claim) never means the live hot-text look already ran.
+      .eq("response_kind", "sms_ai_responder_v1")
+      .limit(1);
+    if (claimError) return;
+    const prior = (claim ?? [])[0] as
+      | { status: string; lease_expires_at: string | null; outcome?: string | null; error_message?: string | null }
+      | undefined;
+    // Done ('completed') or another run's live lease: stop. A released
+    // 'error' claim (an earlier hot-text write failed) or an expired
+    // 'processing' claim (a crashed run) is retried.
+    if (prior && (prior.status === "completed" || (prior.lease_expires_at && Date.parse(prior.lease_expires_at) > (await dbNowMs(supabase))))) return;
+    // Only a hot-text write that really failed is retried. An error claim for another reason (a
+    // keyword hold that could not be written, Astra B1) keeps the existing-classification check
+    // below, so a late redelivery never pays for a second classification.
+    const retryOfFailedWrite = prior?.status === "error"
+      && (prior.error_message === "hot_text_event_not_recorded" || prior.outcome === "hot_text_write_failed");
+    const { data: cfg } = await supabase
+      .from("ai_responder_configs")
+      .select("classifier_provider, classifier_mode, escalation_keywords")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (!cfg || !isJevAutomatic(cfg)) return;
+    const escalationKeywords = (cfg as { escalation_keywords?: string[] | null }).escalation_keywords ?? null;
+    // An unreadable switch runs nothing. The nine-question engine gets its own classify-only look.
+    const engine = await readClassifierEngine(supabase, orgId);
+    if (engine === "unreadable") return;
+    // A replay of an inbound that was already classified (full path or an
+    // earlier classify-only look) is never classified again: no paid call,
+    // no second event for one text.
+    const { data: seen, error: seenError } = await supabase
+      .from("sms_classification_runs")
+      .select("id")
+      .eq("source_inbound_message_id", inboundId)
+      .limit(1);
+    // (A retry of a failed hot-text write classifies again: one extra call
+    // beats a lost alert.)
+    if (seenError || ((seen ?? []).length > 0 && !retryOfFailedWrite)) return;
+    // Claim the inbound atomically (the response-claim table's unique key)
+    // before classifying: concurrent runs of the same held inbound cannot both
+    // call Jev or both act. No real claim row → do nothing (fail closed).
+    const claim2 = await claimAiResponse(supabase, {
+      orgId,
+      inboundMessageId: inboundId,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+    });
+    if (!claim2.claimed || !claim2.claimId) return;
+    let classifyOnlyOutcome: "escalated" | "skipped" | "write_failed" = "write_failed";
+    try {
+      classifyOnlyOutcome = engine === "nine_questions"
+        ? await classifyOnlyClaimedNine(supabase, input, orgId, escalationKeywords, runCtx)
+        : await classifyOnlyClaimed(supabase, input, orgId, runCtx, escalationKeywords);
+    } finally {
+      if (classifyOnlyOutcome === "write_failed") {
+        // The hot text's event (or the run itself) failed: never mark the
+        // inbound done. Release the claim (error, lease expired) so a replay
+        // classifies and writes again.
+        reportError(new Error("hot text on held lead not recorded; claim released for retry"), {
+          tags: { surface: "hot_text_on_held_lead" },
+          extra: { propertyId: input.propertyId, inboundMessageId: inboundId },
+        });
+        await completeAiResponseClaim(supabase, {
+          claimId: claim2.claimId,
+          outcome: "hot_text_write_failed",
+          errorMessage: opts.holdFailed ? "v2_safety_hold_failed" : "hot_text_event_not_recorded",
+          releaseLease: true,
+        });
+      } else if (opts.holdFailed) {
+        // Astra B1: the keyword hold was not written. This claim must never read as handled: the
+        // sweep recovers a text with no claim, an expired processing claim, or this failure state,
+        // never a completed claim. One write, so no repair step can fail or be skipped.
+        await completeAiResponseClaim(supabase, {
+          claimId: claim2.claimId,
+          outcome: classifyOnlyOutcome,
+          errorMessage: "v2_safety_hold_failed",
+        });
+      } else {
+        await completeAiResponseClaim(supabase, { claimId: claim2.claimId, outcome: classifyOnlyOutcome });
+      }
+    }
+  } catch (error) {
+    reportError(error, { tags: { surface: "hot_text_on_held_lead" }, extra: { propertyId: input.propertyId } });
+  }
+}
+
+/**
+ * After a person-review keyword hold whose reason is NOT the hot price
+ * reason: if the text also carries an allowed price signal, run the held-lead
+ * classify-only check (its own gates, atomic claim, one classification,
+ * stop / DNC / wrong / bad number precedence). Used by the normal dispatch and
+ * the delayed-reply inbound path.
+ */
+export async function checkHotTextAfterKeywordHold(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  holdReason: string,
+  escalationKeywords: ReadonlyArray<string> | null,
+  runCtx: MaybeRunContext,
+  knownProperty?: GateProperty & { last_ai_escalation_reason?: string | null },
+  /**
+   * Astra B1 (reviews of 1d7825003 / 051ee6d4f): the keyword hold itself could NOT be written.
+   * The hot-only claim is then completed straight into the sweep-recoverable failure state
+   * (error / v2_safety_hold_failed), in the same write, never `completed` first.
+   */
+  opts: { holdFailed?: boolean } = {},
+): Promise<void> {
+  if (holdReason.startsWith(`keyword:${HOT_KEYWORD_TIER}`) || !input.inboundMessageId) return;
+  if (!isPriceKeyword(input.inboundBody, escalationKeywords)) return;
+  let property = knownProperty ?? null;
+  if (!property) {
+    const { data } = await supabase
+      .from("properties")
+      .select("org_id, ai_responder_disabled, outreach_dispo, needs_human_attention, last_ai_escalation_reason")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (!data) return;
+    property = data as GateProperty & { last_ai_escalation_reason?: string | null };
+  }
+  await classifyOnlyForHotText(
+    supabase,
+    input,
+    { ...property, needs_human_attention: true, last_ai_escalation_reason: holdReason },
+    runCtx,
+    opts,
+  );
+}
+
+/**
+ * Classify-only for the nine-question engine (a text on a lead that already needs a person): one
+ * nine-question read; hot when the answer is open_to_selling / talked_price, or a price keyword
+ * hits and the answer is not asked_stop / hostile / wrong_person / already_sold / tenant. Records the hot text; sends nothing.
+ */
+async function classifyOnlyClaimedNine(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  orgId: string,
+  escalationKeywords: ReadonlyArray<string> | null,
+  runCtx: MaybeRunContext,
+): Promise<"escalated" | "skipped" | "write_failed"> {
+  const cls = await runNineClassification(
+    supabase,
+    {
+      orgId,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx ?? undefined },
+  );
+  // Hostile wording waits for a person's confirmation: never recorded as a hot text.
+  if (isHostileInbound(input.inboundBody)) return "skipped";
+  const keyword = hasHotPriceKeyword(input.inboundBody, escalationKeywords);
+  const answer = cls.kind === "ok" ? cls.result.answer : null;
+  const blocked =
+    answer === "asked_stop" || answer === "hostile" || answer === "wrong_person" || answer === "already_sold" || answer === "tenant";
+  const answerHot = answer === "open_to_selling" || answer === "talked_price";
+  if (blocked || !(answerHot || keyword)) return "skipped";
+  const recorded = await recordHotTextOnHeldLead(supabase, input.propertyId, input.inboundMessageId ?? null, answerHot ? "hot_lead" : "price_or_offer");
+  await trace(supabase, {
+    kind: "action",
+    name: "hot_text_on_held_lead",
+    result: recorded === "recorded" ? "applied" : recorded === "write_failed" ? "error" : "skipped",
+    detail: { engine: "nine_questions", answer },
+  }, runCtx);
+  return recorded === "recorded" ? "escalated" : recorded;
+}
+
+/** The classify-only work, under its claim. Returns the claim outcome. */
+async function classifyOnlyClaimed(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  orgId: string,
+  runCtx: MaybeRunContext,
+  escalationKeywords: ReadonlyArray<string> | null,
+): Promise<"escalated" | "skipped" | "write_failed"> {
+  {
+    const c = await classifyInboundOnce(supabase, { input, orgId, runCtx: runCtx ?? undefined });
+    if (!(await isHotRouting(supabase, orgId, c, input.inboundBody, escalationKeywords))) return "skipped";
+    const escalation = "escalationReason" in c ? c.escalationReason : null;
+    const recorded = await recordHotTextOnHeldLead(supabase, input.propertyId, input.inboundMessageId ?? null, escalation ?? "hot_lead");
+    await trace(supabase, {
+      kind: "action",
+      name: "hot_text_on_held_lead",
+      result: recorded === "recorded" ? "applied" : recorded === "write_failed" ? "error" : "skipped",
+      detail: { escalation: escalation ?? null },
+    }, runCtx);
+    return recorded === "recorded" ? "escalated" : recorded;
+  }
+}
+
+function isJevAutomatic(config: { classifier_provider?: string | null; classifier_mode?: string | null }): boolean {
+  return config.classifier_provider === "jev" && config.classifier_mode === "automatic";
+}
+
+/** Classify this inbound with Jev automatic. Callers pass the result on instead of classifying again. */
+async function classifyInboundOnce(
+  supabase: SupabaseClient<Database>,
+  a: { input: AiDispatchInput; orgId: string; runCtx?: MaybeRunContext },
+): Promise<ClassificationBridgeResult> {
+  const { input } = a;
+  return classifyForDispatch(
+    supabase,
+    {
+      orgId: a.orgId,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
+    },
+    { classifierProvider: "jev", classifierMode: "automatic" },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: a.runCtx },
+  );
+}
+
+/**
+ * THE hot / not-hot routing decision for a classified inbound, used before any
+ * identity text: the shared hot definition, plus the nurture "ready within 30
+ * days" person route (the same routeNurture call the main path makes).
+ */
+async function isHotRouting(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  c: ClassificationBridgeResult,
+  /** The inbound text: the price_offer keyword is hot unless stop / DNC / wrong / bad number won. */
+  inboundBody?: string,
+  /** The org's configured escalation phrases (ai_responder_configs.escalation_keywords), same as the normal path. */
+  escalationKeywords?: ReadonlyArray<string> | null,
+): Promise<boolean> {
+  if (isHotClassification(c)) return true;
+  if (inboundBody && !stopOrDncWins(c) && isPriceKeyword(inboundBody, escalationKeywords)) return true;
+  if (c.kind !== "jev_nurture") return false;
+  const cfg = await loadNurtureAutoDripConfig(supabase, orgId);
+  return cfg.enabled && routeNurture({ readyTimeframe: c.readyTimeframe, listingStatus: c.listingStatus }).kind === "person";
+}
+
+/**
+ * A hot escalation overrides ONLY a nurture, not-interested (at or below its
+ * cutoff) or unclear result. Never opted_out, dnc, wrong_number, bad_number
+ * or any other route.
+ */
+function hotWinsOver(c: ClassificationBridgeResult): boolean {
+  const hotEsc = (r: string | null | undefined) => isHotSeller({ reasons: [r] });
+  if (c.kind === "jev_nurture") return hotEsc(c.escalationReason);
+  if (c.kind === "jev_route") return c.route.kind === "auto_close" && hotEsc(c.escalationReason);
+  if (c.kind === "jev_needs_decision") {
+    return (c.outcome === "nurture" || c.outcome === "not_interested") && hotEsc(c.escalationReason);
+  }
+  // "Unclear" + a hot escalation is hot; "bad_number" sits with wrong-number and never is.
+  if (c.kind === "jev_no_action") return c.outcome === "unclear" && hotEsc(c.escalationReason);
+  return false;
+}
+
+/** The price_offer keyword, matched against the ORG's configured phrases on every path. */
+function isPriceKeyword(body: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
+  return hasAllowedPriceSignal(body, escalationKeywords);
+}
+
+/** Stop / DNC / wrong-number / bad-number results always beat hot (Jarrad's order). */
+function stopOrDncWins(c: ClassificationBridgeResult): boolean {
+  if (c.kind === "jev_route") {
+    return c.route.kind === "opt_out" || c.route.kind === "close_dnc" || c.route.kind === "auto_close_wrong_number";
+  }
+  if (c.kind === "jev_needs_decision") {
+    return c.outcome === "opted_out" || c.outcome === "dnc" || c.outcome === "wrong_number" || c.outcome === "bad_number";
+  }
+  if (c.kind === "jev_no_action") return c.outcome === "bad_number";
+  return false;
+}
+
+/** Hot seller by the shared definition (lib/hot-sellers/hot.ts), with stop / DNC / wrong-number always winning. */
+function isHotClassification(c: ClassificationBridgeResult): boolean {
+  if (c.kind === "jev_promote_new_lead") return true;
+  if (c.kind === "jev_needs_decision" && c.outcome === "new_lead") return true;
+  // The escalate route only comes from outcome new_lead (below its cutoff):
+  // hot whatever the escalation reason.
+  if (c.kind === "jev_route" && c.route.kind === "escalate") return true;
+  return hotWinsOver(c);
+}
+
+/**
+ * Identity-interceptor helper: when this inbound both asks who we are and asks
+ * how we got the number, returns the rendered number-source template, under the
+ * same gates the classified path applies (a nurture / not-interested outcome at
+ * its cutoff, no human follow-up, label switch on, an approved + mapped
+ * template). The classification goes through `classifyForDispatch`, so the Jev
+ * decision is saved like any other (`sms_classification_runs`) and the same
+ * timeout and retries apply; no outcome is applied (the identity path never
+ * applied one). `askedNotSentReason` is set when Jev said yes but no
+ * number-source template could go out, so the caller holds for a person.
+ * Hostile inbounds never reach this (the identity shortcut is skipped).
+ */
+async function resolveNumberSourceForIdentity(
+  supabase: SupabaseClient<Database>,
+  a: {
+    input: AiDispatchInput;
+    orgId: string;
+    config: { classifier_provider?: string | null; classifier_mode?: string | null };
+    runCtx?: MaybeRunContext;
+    precomputed?: ClassificationBridgeResult | null;
+  },
+): Promise<{
+  template:
+    | (Extract<Awaited<ReturnType<typeof resolveApprovedTemplateReply>>, { kind: "template" }> & {
+        nativeConfidence: number | null;
+      })
+    | null;
+  askedNotSentReason: string | null;
+}> {
+  const { input } = a;
+  const none = { template: null, askedNotSentReason: null };
+  if (a.config.classifier_provider !== "jev" || a.config.classifier_mode !== "automatic") return none;
+  if (!(await hasSendableNumberSourceTemplate(supabase, a.orgId))) return none;
+  const classification = a.precomputed ?? await classifyInboundOnce(supabase, { input, orgId: a.orgId, runCtx: a.runCtx });
+  let outcome: "nurture" | "not_interested" | null = null;
+  let asked = false;
+  let nativeConfidence: number | null = null;
+  let escalationReason: JevEscalationReason | null = null;
+  if (classification.kind === "jev_nurture") {
+    outcome = "nurture";
+    asked = classification.askedHowNumberObtained;
+    nativeConfidence = classification.nativeConfidence;
+    escalationReason = classification.escalationReason;
+  } else if (
+    classification.kind === "jev_route" &&
+    classification.route.kind === "auto_close" &&
+    classification.eligibleForAutoAccept
+  ) {
+    outcome = "not_interested";
+    asked = classification.askedHowNumberObtained;
+    nativeConfidence = classification.nativeConfidence;
+    escalationReason = classification.escalationReason;
+  } else if (
+    (classification.kind === "jev_route" || classification.kind === "jev_promote_new_lead") &&
+    classification.askedHowNumberObtained
+  ) {
+    return { template: null, askedNotSentReason: "outcome_not_templatable" };
+  } else if (
+    (classification.kind === "jev_needs_decision" || classification.kind === "jev_no_action") &&
+    classification.askedHowNumberObtained
+  ) {
+    // Jev heard the question but the outcome is below its cutoff / has no action:
+    // the identity reply goes out as today and a person answers the number question.
+    return { template: null, askedNotSentReason: classification.kind === "jev_needs_decision" ? "below_threshold" : "no_action" };
+  }
+  if (!outcome || !asked) return none;
+  const resolved = await resolveApprovedTemplateReply(supabase, {
+    orgId: a.orgId,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    outcome,
+    mappingKey: NUMBER_SOURCE_REPLY_KEY,
+    outcomeConfidence: nativeConfidence,
+    escalationReason,
+    replyIntent: null,
+  });
+  return resolved.kind === "template"
+    ? { template: { ...resolved, nativeConfidence }, askedNotSentReason: null }
+    : { template: null, askedNotSentReason: resolved.reason };
+}
+
+/**
+ * Nurture auto-drip step (per-org switch `nurture_auto_drip`, default off).
+ * Order is strict: the approved nurture reply must have been accepted by the
+ * provider, THEN the lead is enrolled. When the reply did not go out (quiet
+ * hours, gate refusal, outbound hold, no approved/mapped template) nothing is
+ * enrolled and a person is asked to reply and start the drip
+ * (`nurture_reply_not_sent:<reason>`). A refused enrolment leaves the lead as
+ * nurture and raises `drip_enroll_failed:<reason>`. With the switch off this is
+ * a no-op: no read beyond the config, no step recorded.
+ */
+/** Tail of the `drip_enroll_failed:` hold when enrolment threw. */
+const ENROLL_THREW = "enroll_threw";
+
+async function runNurtureAutoDripStep(
+  supabase: SupabaseClient<Database>,
+  a: {
+    propertyId: string;
+    /** The inbound's sender: enrolled when the lead has no saved homeowner. */
+    contactId: string;
+    cfg: NurtureAutoDripConfig;
+    route: NurtureRoute | null;
+    replySent: boolean;
+    notSentReason: string;
+    runCtx?: MaybeRunContext;
+  },
+): Promise<void> {
+  if (!a.cfg.enabled || !a.route || a.route.kind !== "drip") return;
+  const { drip, delayDays } = a.route;
+  if (!a.replySent) {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "skipped",
+      detail: { why: "reply_not_sent", detail: a.notSentReason, route: drip },
+    }, a.runCtx);
+    await markPropertyNeedsAttention(supabase, a.propertyId, `nurture_reply_not_sent:${a.notSentReason}`, a.runCtx);
+    return;
+  }
+  let result: Awaited<ReturnType<typeof enrollNurtureInDrip>>;
+  try {
+    result = await enrollNurtureInDrip(supabase, {
+      propertyId: a.propertyId,
+      sequenceId: a.cfg.sequences[drip],
+      delayDays,
+      route: drip,
+      contactId: a.contactId,
+    });
+  } catch (error) {
+    reportError(error, { tags: { surface: "nurture_auto_drip" }, extra: { propertyId: a.propertyId } });
+    result = { status: "refused", reason: ENROLL_THREW };
+  }
+  if (result.status === "refused") {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "error",
+      detail: { reason: result.reason, route: drip },
+    }, a.runCtx);
+    await markPropertyNeedsAttention(
+      supabase,
+      a.propertyId,
+      result.reason === "drip_paused" ? "drip_paused" : `drip_enroll_failed:${result.reason}`,
+      a.runCtx,
+    );
+    return;
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "drip_enrolled",
+    result: "applied",
+    detail: {
+      status: result.status,
+      route: drip,
+      sequenceId: result.sequenceId,
+      ...(result.status === "enrolled"
+        ? { enrollmentId: result.enrollmentId, firstSendNotBefore: result.firstSendNotBefore }
+        : {}),
+    },
+  }, a.runCtx);
 }
 
 /**
@@ -2518,7 +4069,7 @@ async function deliverRoutedReply(
     responseClaim: { claimId: string | null; startedAt?: string };
     runCtx?: MaybeRunContext;
     reply: {
-      kind: "send_reply" | "deescalate_close" | "identity";
+      kind: "send_reply" | "deescalate_close" | "identity" | "nine_hot_reply";
       body: string;
       confidence: number;
       sentiment: AiMessageMetadata["sentiment"];
@@ -2577,6 +4128,50 @@ async function deliverRoutedReply(
     outboundMessageId: sent.messageId,
   });
   return sent;
+}
+
+/**
+ * A-2 F2: a hold about OUR OWN earlier reply ('mechanics', from an older inbound) does not make
+ * a newer seller text terminal: that text is routed fresh and the v2 transition clears the hold
+ * (audited). Decided in SQL (created_at, id) under the DB clock. A human-owned disposition still
+ * wins; any read error keeps today's terminal behaviour.
+ */
+async function mechanicsHoldYieldsTo(
+  supabase: SupabaseClient<Database>,
+  property: { id?: string; org_id?: string | null; needs_human_attention?: boolean | null; outreach_dispo?: string | null },
+  inboundMessageId: string | null | undefined,
+  /** The caller already decided v2 is live (the early gate's single strict read). */
+  decided?: { v2Live: true },
+): Promise<boolean> {
+  if (!property.needs_human_attention || !property.id || !inboundMessageId) return false;
+  if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo ?? null })) return false;
+  // Astra review of 921b71c2a133 (P1): only the v2 transition clears a mechanics hold (audited), so
+  // the hold yields only while v2 routing is live for this property. With v2 off (never on, or
+  // turned off after it wrote the hold) the hold is terminal exactly as today; any read error too.
+  let orgId = property.org_id ?? null;
+  if (!decided?.v2Live && !orgId) {
+    const { data: row, error: orgError } = await supabase.from("properties").select("org_id").eq("id", property.id).maybeSingle();
+    if (orgError || !row?.org_id) return false;
+    orgId = row.org_id;
+  }
+  if (!decided?.v2Live && (await routingV2LiveForSweep(supabase, orgId!, property.id)) !== "yes") return false;
+  let data: unknown;
+  let error: { message: string } | null;
+  try {
+    ({ data, error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_mechanics_hold_yields", {
+      p_property_id: property.id, p_inbound_message_id: inboundMessageId,
+    }));
+  } catch (e) {
+    error = { message: e instanceof Error ? e.message : String(e) };
+  }
+  if (error) {
+    // Deployed ahead of the migration (function missing) or a read error: terminal, as today.
+    if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_mechanics_hold_yields" }, extra: { propertyId: property.id } });
+    }
+    return false;
+  }
+  return data === true;
 }
 
 function isTerminalAiResponderProperty(
@@ -2703,6 +4298,12 @@ export type ReplySource = "approved_template" | "llm" | "human";
 export function resolveOutboundPolicy(args: {
   source: ReplySource;
   dbMode?: string | null;
+  /**
+   * The body is the fixed, human-approved identity text (IDENTITY_REPLY_BODY),
+   * not model-written. It is exempt ONLY from the LLM-autosend switch; every
+   * outbound-mode hold and every other guard still applies.
+   */
+  approvedFixedText?: boolean;
 }): { hold: false } | { hold: true; reason: "outbound_mode_hold" | "llm_autosend_off" } {
   // A human clicking Send on a held draft is the human decision the hold was
   // waiting for. The AI outbound policy (draft-only rollback, LLM autosend off)
@@ -2713,10 +4314,30 @@ export function resolveOutboundPolicy(args: {
   if (envMode === "hold" || args.dbMode === "hold") {
     return { hold: true, reason: "outbound_mode_hold" };
   }
-  if (args.source === "llm" && process.env.AI_RESPONDER_LLM_AUTOSEND?.trim() === "0") {
+  if (args.source === "llm" && !args.approvedFixedText && process.env.AI_RESPONDER_LLM_AUTOSEND?.trim() === "0") {
     return { hold: true, reason: "llm_autosend_off" };
   }
   return { hold: false };
+}
+
+/**
+ * The nine-question identity send is fixed approved text only when the caller
+ * opted in explicitly AND it runs with the recipient-window/Florida-cap guards
+ * (windowDeferrable) AND both its kind and its exact body match. The legacy
+ * identity interceptor and carried retries never opt in, so they stay governed
+ * by the LLM-autosend switch.
+ */
+export function isApprovedFixedText(args: {
+  approvedFixedText?: boolean;
+  windowDeferrable?: boolean;
+  replyKind?: string | null;
+  body: string;
+}): boolean {
+  if (args.approvedFixedText !== true || args.windowDeferrable !== true) return false;
+  if (args.replyKind === "identity") return args.body === IDENTITY_REPLY_BODY;
+  // The three hot reply texts Jarrad approved verbatim 2026-10-20 (sendNineHotReply only).
+  if (args.replyKind === "nine_hot_reply") return (Object.values(NINE_HOT_REPLY_TEXTS) as string[]).includes(args.body);
+  return false;
 }
 
 /**
@@ -2773,13 +4394,21 @@ async function evaluateSendGate(
      * consent, terminal disposition, responder off) still applies.
      */
     humanActor?: boolean;
+    /**
+     * Opus review of 93a8070932bd (B1): an older mechanics hold may yield only on the v2 road:
+     * "decided" = the early gate's single strict read said v2 is live; "outbox" = this is a v2
+     * outbox reply send (re-checked strictly). Absent = the legacy road: the hold is terminal.
+     */
+    mechanicsYield?: "decided" | "outbox";
   },
 ): Promise<GateEvaluation> {
-  const nowMs = Date.now();
+  // Astra review of b6a00a0a2f17 (C): the gate compares DB-written times (inbound created_at,
+  // claim leases, sent_at), so "now" is the DB's.
+  const nowMs = await dbNowMs(supabase);
 
   // Rule 0 evidence (suppression / disabled / consent / terminal): silent by
   // design and decided before anything else is read.
-  const silent = await loadSilentExit(supabase, input, opts.property ?? null, opts.humanActor === true);
+  const silent = await loadSilentExit(supabase, input, opts.property ?? null, opts.humanActor === true, opts.mechanicsYield);
   if (!silent.ok) return { ok: false };
   if (silent.reason) {
     return {
@@ -2834,6 +4463,7 @@ async function evaluateSendGate(
 
   const outbound = await gatherOutboundFacts(supabase, input, opts, nowMs);
   if (!outbound.ok) return outbound.truncated ? { ok: false, reason: "evidence_truncated" } : { ok: false };
+  if (opts.phase === "presend") await testBarrier("outbox:presend_after_evidence", { propertyId: input.propertyId, inboundMessageId: input.inboundMessageId ?? null });
   return {
     ok: true,
     decision: decideSendGate({ newerInbound, outbound: outbound.facts }, { phase: opts.phase }),
@@ -2853,6 +4483,7 @@ async function loadSilentExit(
   input: AiDispatchInput,
   known: GateProperty | null,
   humanActor = false,
+  mechanicsYield?: "decided" | "outbox",
 ): Promise<{ ok: true; reason: string | null } | { ok: false }> {
   // A human send reads the flag reason fresh: the exemption below depends on
   // it, and the early gate's row does not carry it.
@@ -2897,7 +4528,9 @@ async function loadSilentExit(
         reason: `already_flagged:${property.last_ai_escalation_reason ?? "unknown"}`,
       };
     }
-  } else if (isTerminalAiResponderProperty(property)) {
+  } else if (isTerminalAiResponderProperty(property) && !(mechanicsYield
+      && (await mechanicsHoldYieldsTo(supabase, { ...property, id: input.propertyId }, input.inboundMessageId,
+        mechanicsYield === "decided" ? { v2Live: true } : undefined)))) {
     return { ok: true, reason: "already_terminal" };
   }
 
@@ -2997,7 +4630,7 @@ async function gatherOutboundFacts(
   const rows = new Map<string, Row>();
 
   const threadQuery = (statuses: readonly string[]) => {
-    let query = supabase
+    const query = supabase
       .from("messages")
       .select(columns)
       .eq("property_id", input.propertyId)
@@ -3245,6 +4878,14 @@ function providerTimeoutMs(): number {
 }
 
 type ResponderSendArgs = {
+  /** Routing-v2 intent authorized by its single-attempt consumer; rechecked at the provider boundary. */
+  routingV2OutboxId?: string;
+  /** Routing v2 phone action (PR-G): its durable send id, used as the provider idempotency key. */
+  providerIdempotencyKey?: string;
+  /** §5.4: the work item's test tag (routing v2 outbox row), checked at the provider boundary. */
+  testRunId?: string | null;
+  /** Routing v2 phone action (PR-G): final flags/canary/suppression check right before the provider. */
+  routingV2SendAllowed?: () => Promise<boolean>;
   input: AiDispatchInput;
   body: string;
   model: string;
@@ -3257,6 +4898,10 @@ type ResponderSendArgs = {
   approvedBy?: { userId: string; edited: boolean };
   /** The library template behind an `approved_template` send (evidence + message metadata). */
   templateId?: string | null;
+  /** The unrendered library text `body` was rendered from; the send-time approval re-check compares it (not the rendered body) to the approved text. Defaults to `body`. */
+  templateSource?: string | null;
+  /** Mapping key of that template (`number_source` etc.), stored as `reply_key` so a later inbound can tell it is answering that reply. */
+  replyKey?: string | null;
   orgId: string;
   /** When this run took its claim; null when unknown (check skipped). */
   claimStartedAt: string | null;
@@ -3275,6 +4920,14 @@ type ResponderSendArgs = {
    * Must not throw.
    */
   onProviderAccepted?: (messageId: string) => Promise<void>;
+  /** See runApprovedTemplateStep `windowDeferrable`; also makes the recipient window apply to an identity (llm) send. */
+  windowDeferrable?: boolean;
+  /**
+   * Nine-question identity send only: the body is the fixed human-approved
+   * IDENTITY_REPLY_BODY, so the LLM-autosend switch does not hold it (see
+   * isApprovedFixedText). Every other guard still applies.
+   */
+  approvedFixedText?: boolean;
   /**
    * Per-send flag proof, created by `sendResponderMessage` for each call (never
    * shared between runs): set `failed` when this send's own attention flag
@@ -3371,7 +5024,22 @@ async function applyGateEvaluation(
     await trace(supabase, { kind: "gate", name: "reply_pending", result: "block" }, args.runContext);
     return retryOrFailReply(supabase, args, "reply_pending", guard);
   }
-  const plan = skipPlanFor(decision, "presend")!;
+  // A-2 C3: a queued v2 reply whose rule 3 fired only because OUR OWN older auto reply (to
+  // another seller text) already went out is cancelled quietly; the outbox decides the hold
+  // (C1). A person's text (human_unrelated) and every non-v2 caller keep today's flag.
+  if (args.routingV2OutboxId && isOwnOlderAutoReplyOnly(decision)) {
+    guard();
+    await trace(supabase, { kind: "gate", name: V2_OLDER_AUTO_REPLY_SENT, result: "block", detail: { rule: 3 } }, args.runContext);
+    return { outcome: "skipped", reason: V2_OLDER_AUTO_REPLY_SENT };
+  }
+  // A-2 race analysis F1: a queued v2 reply overtaken by a newer seller text (rule 1, flagged or
+  // not) is cancelled and nothing more. It never writes a hold and never reads another request's
+  // progress: the newer text is routed (or, if its own handler dies, held by the lease-death
+  // sweep) on its own lifecycle. Non-v2 callers keep today's rule-1 behaviour.
+  const basePlan = skipPlanFor(decision, "presend")!;
+  const plan = args.routingV2OutboxId && decision.action === "skip" && decision.rule === 1
+    ? { ...basePlan, flagReason: null }
+    : basePlan;
   guard();
   await trace(
     supabase,
@@ -3384,13 +5052,18 @@ async function applyGateEvaluation(
   );
   if (plan.flagReason) {
     guard();
-    const flagged = await markPropertyNeedsAttention(
-      supabase,
-      args.input.propertyId,
-      plan.flagReason,
-      args.runContext,
-      guard,
-    );
+    // A-2 F2: a queued v2 reply's flag is about our own reply (mechanics): written through the
+    // one fenced hold writer, only if no newer seller text exists ('superseded' = the newer text
+    // owns the thread: no hold, counted as handled).
+    const flagged = args.routingV2OutboxId && args.input.inboundMessageId
+      ? await writeV2Hold(supabase, args.input.propertyId, args.input.inboundMessageId, plan.flagReason, "mechanics") !== "error"
+      : await markPropertyNeedsAttention(
+        supabase,
+        args.input.propertyId,
+        plan.flagReason,
+        args.runContext,
+        guard,
+      );
     if (!flagged) {
       // The flag could not be proven: the seller is unanswered and no human
       // was told. The reply exists, so it is dead-lettered (rule 7); the
@@ -3786,6 +5459,8 @@ type SendAttempt = {
   fenceRefusal: null | "lost" | "error" | "abandoned" | "revalidate";
   /** Why the fence's live re-validation refused (`fence:suppressed`, ...). */
   fenceReason?: string;
+  /** The recipient-window verdict's reason when the fence refused on it (`outside_window`, `florida_cap`, ...). */
+  fenceWindowWhy?: string;
 };
 
 class AttemptAbandoned extends Error {
@@ -3914,6 +5589,8 @@ async function renewSend(
  */
 const FENCE_QUIET_HOURS_RECIPIENT = "fence:quiet_hours_recipient";
 const FENCE_TEMPLATE_APPROVAL_CHANGED = "fence:template_approval_changed";
+const FENCE_NINE_CONTEXT_CHANGED = "fence:nine_deferred_context_changed";
+const FENCE_PROPERTY_WINDOW = "fence:property_window";
 
 async function fenceProviderSubmit(
   supabase: SupabaseClient<Database>,
@@ -3948,6 +5625,7 @@ async function fenceProviderSubmit(
     return false;
   };
   const evaluation = await evaluateSendGate(supabase, args.input, {
+    ...((args as { routingV2OutboxId?: string }).routingV2OutboxId ? { mechanicsYield: "outbox" as const } : {}),
     phase: "presend",
     claimStartedAt: args.claimStartedAt,
     checkNewerInbound: !!args.input.inboundMessageId,
@@ -3970,8 +5648,28 @@ async function fenceProviderSubmit(
     attempt.fenceRefusal = "abandoned";
     return false;
   }
-  if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode }).hold) return refuse("fence:hold");
-  if (args.source === "approved_template") {
+  if (resolveOutboundPolicy({ source: args.source, dbMode: liveMode, approvedFixedText: isApprovedFixedText(args) }).hold) return refuse("fence:hold");
+  if (args.windowDeferrable) {
+    // The property's own window (business hours / quiet hours: the same checkQuietHours rule
+    // sendSmsToContact applies at its step 4, which runs BEFORE several awaits). Re-checked
+    // here so a deferrable nine reply cannot reach the provider after it closes.
+    const { data: prop, error: propError } = await supabase
+      .from("properties")
+      .select("state")
+      .eq("id", args.input.propertyId)
+      .maybeSingle();
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    const propertyWindow = propError || !prop ? null : checkQuietHours(prop.state);
+    if (!propertyWindow || !propertyWindow.ok) {
+      attempt.fenceWindowWhy = propertyWindow && !propertyWindow.ok ? propertyWindow.reason : "unreadable";
+      return refuse(FENCE_PROPERTY_WINDOW);
+    }
+  }
+  if (args.source === "approved_template" || args.windowDeferrable) {
     // The last word before the provider, AFTER every preflight read in
     // sendSmsToContact: the owner may have revoked / edited / deleted the
     // template and the recipient's window (or the Florida cap) may have
@@ -3983,14 +5681,65 @@ async function fenceProviderSubmit(
       attempt.fenceRefusal = "abandoned";
       return false;
     }
-    if (!window.ok) return refuse(FENCE_QUIET_HOURS_RECIPIENT);
-    const approved = await templateStillApproved(supabase, args);
+    if (!window.ok) {
+      attempt.fenceWindowWhy = window.why;
+      return refuse(FENCE_QUIET_HOURS_RECIPIENT);
+    }
+    // An identity (llm) send has no library template to re-check.
+    const approved = args.source === "approved_template" ? await templateStillApproved(supabase, args) : true;
     if (pastDeadline()) {
       attempt.abandoned = true;
       attempt.fenceRefusal = "abandoned";
       return false;
     }
     if (!approved) return refuse(FENCE_TEMPLATE_APPROVAL_CHANGED);
+  }
+  const deferral = args.input.nineDeferral;
+  if (deferral) {
+    // A deferred nine-question reply acts only on the lead it decided on: compare the live
+    // revision, allowing exactly the one bump this attempt's own pending message row causes.
+    const { data: live, error: liveError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", args.input.propertyId)
+      .maybeSingle();
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    const expected = deferral.revision + (ctx.messageId ? 1 : 0);
+    if (liveError || !live || live.decision_context_revision !== expected) return refuse(FENCE_NINE_CONTEXT_CHANGED);
+  }
+  if (args.routingV2OutboxId) {
+    await testBarrier("outbox:before_fence", { propertyId: args.input.propertyId, inboundMessageId: args.input.inboundMessageId ?? null });
+    const { data, error } = await (supabase as unknown as {
+      rpc: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: unknown }>;
+    }).rpc("routing_v2_check_authorized_outbox_send", {
+      p_outbox_id: args.routingV2OutboxId,
+      p_property_id: args.input.propertyId,
+      p_inbound_message_id: args.input.inboundMessageId ?? null,
+    });
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (error || data !== "ok") return refuse("fence:routing_v2_outbox");
+  }
+  if (args.routingV2SendAllowed) {
+    let allowed = false;
+    try {
+      allowed = await args.routingV2SendAllowed();
+    } catch {
+      allowed = false;
+    }
+    if (pastDeadline()) {
+      attempt.abandoned = true;
+      attempt.fenceRefusal = "abandoned";
+      return false;
+    }
+    if (!allowed) return refuse("fence:routing_v2_phone_action");
   }
   attempt.providerStarted = true;
   return true;
@@ -4138,6 +5887,8 @@ async function refuseOutsideRecipientWindow(
     result: "block",
     detail: { reason: verdict.why, state: verdict.state, localTime: verdict.localTime },
   }, args.runContext);
+  // Window-only refusal of a deferrable nine reply: nothing flagged, the caller defers.
+  if (args.windowDeferrable && verdict.why === "outside_window") return { outcome: "skipped", reason: NINE_WINDOW_CLOSED };
   await flagAndDeadLetterFor(supabase, args, "quiet_hours_recipient");
   return { outcome: "escalated", reason: "quiet_hours_recipient" };
 }
@@ -4245,9 +5996,11 @@ async function sendResponderMessageInner(
   const initialPolicy = resolveOutboundPolicy({
     source: args.source,
     dbMode: args.outboundMode,
+    approvedFixedText: isApprovedFixedText(args),
   });
   if (initialPolicy.hold) {
     const evaluation = await evaluateSendGate(supabase, args.input, {
+      ...((args as { routingV2OutboxId?: string }).routingV2OutboxId ? { mechanicsYield: "outbox" as const } : {}),
       phase: "presend",
       claimStartedAt: args.claimStartedAt,
       checkNewerInbound: !!args.input.inboundMessageId,
@@ -4261,7 +6014,7 @@ async function sendResponderMessageInner(
   // Template auto-sends are also gated on the RECIPIENT's local time (8am-9pm,
   // Florida 8am-8pm + 3 texts per 24h): the property's state is not where the
   // seller is. A refusal is a rule 7 exit (flag a human, text dead-lettered).
-  if (args.source === "approved_template") {
+  if (args.source === "approved_template" || args.windowDeferrable) {
     const refused = await refuseOutsideRecipientWindow(supabase, args);
     if (refused) return refused;
   }
@@ -4758,7 +6511,7 @@ async function repairOrphanedTimeouts(
       if (!Number.isFinite(stampedMs) || Date.now() - stampedMs < ORPHAN_MIN_AGE_MS) continue;
       candidates.push({ prop, inboundId, stampedAt });
     }
-    let existing = new Set<string>();
+    const existing = new Set<string>();
     if (candidates.length > 0) {
       const ids = candidates.map((c) => c.inboundId);
       for (let i = 0; i < ids.length; i += ORPHAN_IN_CHUNK) {
@@ -5010,6 +6763,7 @@ async function leasedSend(
   // Re-validate UNDER the reservation (the Q8 table, final): READ everything,
   // then re-check the attempt is still live, only then apply (flag / trace).
   const evaluation = await evaluateSendGate(supabase, args.input, {
+    ...((args as { routingV2OutboxId?: string }).routingV2OutboxId ? { mechanicsYield: "outbox" as const } : {}),
     phase: "presend",
     claimStartedAt: args.claimStartedAt,
     checkNewerInbound: !!args.input.inboundMessageId,
@@ -5022,7 +6776,7 @@ async function leasedSend(
   // Re-read the policy immediately before the provider call.
   const liveMode = await loadLiveOutboundMode(supabase, args.orgId, args.outboundMode);
   assertLive(attempt);
-  const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode });
+  const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode, approvedFixedText: isApprovedFixedText(args) });
   if (livePolicy.hold) {
     return await holdReplyAsDraft(supabase, args, livePolicy.reason, guard);
   }
@@ -5048,7 +6802,7 @@ async function templateStillApproved(
       data.approved_for_auto_send === true &&
       data.approved_content !== null &&
       data.approved_content === data.content &&
-      data.approved_content === args.body
+      data.approved_content === (args.templateSource ?? args.body)
     );
   } catch {
     return false;
@@ -5088,12 +6842,20 @@ async function deliverResponderMessage(
   // the attempt deadline) and refuses the submission if either is gone.
   const sendResult = await sendSmsToContact(supabase, {
     origin: "automated",
+    // Opus B2 on #956: a person's Send on a held draft is never refused by the obligation gate.
+    ...(args.source === "human" ? { personInitiated: true } : {}),
     contactId: args.input.contactId,
     propertyId: args.input.propertyId,
     body: args.body,
     from: inboundToPhone ?? undefined,
     to: args.input.inboundFromPhone ?? undefined,
     requireStickyFrom: true,
+    // Routing v2: the provider submission is keyed by the outbox id, so a replay of the same
+    // intent returns the durable original and never reaches the provider twice.
+    ...(args.routingV2OutboxId || args.providerIdempotencyKey
+      ? { idempotencyKey: args.providerIdempotencyKey ?? args.routingV2OutboxId }
+      : {}),
+    ...(args.testRunId ? { testRunId: args.testRunId } : {}),
     beforeProviderSubmit: (ctx) => fenceProviderSubmit(supabase, attempt, args, ctx),
     // Fired inside the send, right after the provider accepts and before its
     // receipt persistence / reconciliation.
@@ -5114,6 +6876,13 @@ async function deliverResponderMessage(
   });
 
   if (sendResult.status === "blocked_before_provider") {
+    if (sendResult.refusal === TEST_SEND_REFUSED) {
+      // §5.4: a test-tagged reply to a number the business does not own. Terminal on every
+      // path: never retried (one message row, one refusal row), never dead-lettered or flagged.
+      guard();
+      await trace(supabase, { kind: "gate", name: TEST_SEND_REFUSED, result: "block" }, args.runContext);
+      return { outcome: "skipped", reason: TEST_SEND_REFUSED };
+    }
     if (sendResult.retired === false) {
       // The refused row could not be retired: it still carries the stamp that
       // owns this inbound, so a retry would collide with it. Never retry over
@@ -5126,7 +6895,10 @@ async function deliverResponderMessage(
     }
     if (
       attempt.fenceRefusal === "revalidate" &&
-      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED || attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT)
+      (attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED ||
+        attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT ||
+        attempt.fenceReason === FENCE_NINE_CONTEXT_CHANGED ||
+        attempt.fenceReason === FENCE_PROPERTY_WINDOW)
     ) {
       // The template must not go out now. Nothing was sent; drop it silently
       // (the outcome still applies, same as the earlier pre-send drops).
@@ -5137,12 +6909,22 @@ async function deliverResponderMessage(
         result: "block",
         detail: { reason: attempt.fenceReason },
       }, args.runContext);
+      if (
+        args.windowDeferrable &&
+        (attempt.fenceReason === FENCE_QUIET_HOURS_RECIPIENT || attempt.fenceReason === FENCE_PROPERTY_WINDOW) &&
+        attempt.fenceWindowWhy === "outside_window"
+      ) {
+        // At the fence this attempt's pending row already exists (and moved the revision once).
+        return { outcome: "skipped", reason: NINE_WINDOW_CLOSED_AT_FENCE };
+      }
       return {
         outcome: "skipped",
         reason:
           attempt.fenceReason === FENCE_TEMPLATE_APPROVAL_CHANGED
             ? TEMPLATE_APPROVAL_CHANGED
-            : TEMPLATE_QUIET_HOURS_RECIPIENT,
+            : attempt.fenceReason === FENCE_NINE_CONTEXT_CHANGED
+              ? NINE_DEFERRED_CONTEXT_CHANGED
+              : TEMPLATE_QUIET_HOURS_RECIPIENT,
       };
     }
     if (attempt.fenceRefusal === "error") {
@@ -5161,6 +6943,7 @@ async function deliverResponderMessage(
         detail: { reason: attempt.fenceReason ?? "fence:gate:error" },
       }, args.runContext);
       const evaluation = await evaluateSendGate(supabase, args.input, {
+        ...((args as { routingV2OutboxId?: string }).routingV2OutboxId ? { mechanicsYield: "outbox" as const } : {}),
         phase: "presend",
         claimStartedAt: args.claimStartedAt,
         checkNewerInbound: !!args.input.inboundMessageId,
@@ -5171,7 +6954,7 @@ async function deliverResponderMessage(
       if (stale) return stale;
       const liveMode = await loadLiveOutboundMode(supabase, args.orgId, args.outboundMode);
       guard();
-      const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode });
+      const livePolicy = resolveOutboundPolicy({ source: args.source, dbMode: liveMode, approvedFixedText: isApprovedFixedText(args) });
       if (livePolicy.hold) return holdReplyAsDraft(supabase, args, livePolicy.reason, guard);
       return retryOrFailReply(supabase, args, "send_lease_lost", guard);
     }
@@ -5246,6 +7029,20 @@ async function deliverResponderMessage(
     return failClosed(supabase, args, "send_check_failed", undefined, guard);
   }
 
+  if (sendResult.status === "blocked_quiet_hours" && args.routingV2OutboxId && !sendResult.check.ok && sendResult.check.reason === "unknown_state") {
+    // B-1: the property's state cannot be read, so there is no window to wait for. Not a
+    // quiet-hours close and never a routine no-op: a person looks (the outbox holds).
+    guard();
+    await trace(supabase, { kind: "gate", name: "quiet_hours", result: "block", detail: { window: "unknown_state" } }, args.runContext);
+    return { outcome: "skipped", reason: NINE_WINDOW_UNKNOWN_STATE };
+  }
+  if (sendResult.status === "blocked_quiet_hours" && args.windowDeferrable) {
+    // The property's own window (checked inside the send, before any row is written):
+    // window-only, so a deferrable nine reply is deferred instead of flagged.
+    guard();
+    await trace(supabase, { kind: "gate", name: "quiet_hours", result: "block", detail: { deferrable: true } }, args.runContext);
+    return { outcome: "skipped", reason: NINE_WINDOW_CLOSED };
+  }
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
     const reason = `send_blocked:${sendResult.status}`;
     await flagAndDeadLetterFor(supabase, args, reason, { guard });
@@ -5273,7 +7070,11 @@ async function deliverResponderMessage(
     sentiment: args.sentiment,
     turn: args.turn,
     ...(args.source === "approved_template"
-      ? { reply_source: "approved_template" as const, template_id: args.templateId ?? null }
+      ? {
+          reply_source: "approved_template" as const,
+          template_id: args.templateId ?? null,
+          ...(args.replyKey ? { reply_key: args.replyKey } : {}),
+        }
       : {}),
   };
   const { data: messageRow, error: messageLookupError } = await supabase
@@ -6192,6 +7993,24 @@ export async function flagConfirmDncHold(
 }
 
 
+/**
+ * The number-source hold carries an obligation (a person must answer or look), and
+ * on the identity path the message is already out so the dispatch cannot be re-run.
+ * Tries the flag write up to three times; a persistent failure is reported by
+ * `markPropertyNeedsAttention` and returned as false.
+ */
+async function holdWithRetry(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  reason: string,
+  runContext?: MaybeRunContext,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (await markPropertyNeedsAttention(supabase, propertyId, reason, runContext)) return true;
+  }
+  return false;
+}
+
 export async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,
   propertyId: string,
@@ -6203,6 +8022,8 @@ export async function markPropertyNeedsAttention(
    * awaits, so the attempt can expire in between). Not an attempt = no guard.
    */
   guard: Guard = NO_GUARD,
+  /** Called with the flag time only when THIS call set the flag (not when it was already set). */
+  onSet?: (flagAt: string) => void,
 ): Promise<boolean> {
   // Evidence first: the hold is recorded whether or not the flag write wins.
   guard();
@@ -6233,23 +8054,32 @@ export async function markPropertyNeedsAttention(
     return false;
   }
   if (!updated) {
-    // Nothing matched `needs_human_attention = false`: either a human was
-    // already told (the flag exists: success) or the property is gone / the
-    // write silently matched nothing. Prove which before claiming success.
-    const { data: current, error: readError } = await supabase
-      .from("properties")
-      .select("needs_human_attention")
-      .eq("id", propertyId)
-      .maybeSingle();
-    const exists = !readError && current?.needs_human_attention === true;
-    if (!exists) {
-      reportError(new Error(readError?.message ?? "attention flag not persisted"), {
-        tags: { surface: "ai_responder_mark_attention" },
-        extra: { propertyId, reason },
-      });
+    // Nothing matched `needs_human_attention = false`. Reviews of 3288da8ef6b3 / 251a3321672a
+    // (B-1, N-2, N-3): write this hold through the one hold writer, atomically, without reading
+    // first: it holds a lead that became unheld meanwhile, and upgrades a lead held only for our
+    // own unsent reply (mechanics) to safety so the next text cannot clear it.
+    const r = await writeSafetyHold(supabase, propertyId, null, reason);
+    if (r === "upgraded" || r === "already_held") return true;
+    if (r === "missing" || r === "error") return false;
+    if (r === "unavailable") {
+      // The function is not deployed yet: prove the flag exists (pre-420000 behaviour).
+      const { data: current, error: readError } = await supabase
+        .from("properties")
+        .select("needs_human_attention")
+        .eq("id", propertyId)
+        .maybeSingle();
+      const exists = !readError && current?.needs_human_attention === true;
+      if (!exists) {
+        reportError(new Error(readError?.message ?? "attention flag not persisted"), {
+          tags: { surface: "ai_responder_mark_attention" },
+          extra: { propertyId, reason },
+        });
+      }
+      return exists;
     }
-    return exists;
+    // r === "held": this call set the flag; reconcile below as for the plain write.
   }
+  onSet?.(now);
   // Reconciliation of a SUCCESSFUL flag: the lead-event ledger entry is
   // evidence about a flag that already exists. A failure here must never turn
   // a persisted flag into a failed one (nor propagate), so it is reported and
@@ -6411,4 +8241,2620 @@ async function notifyAdminsOfProviderFailure(
       extra: { orgId: args.orgId, failure: args.failure },
     });
   }
+}
+
+
+// ----------------------------------------------------------------------------
+// Messages v2 PR 3 — Jarrad's nine questions (per-org switch
+// `ai_responder_configs.classifier_engine = 'nine_questions'`, automatic mode).
+// Replies are only approved library texts; every send goes through the existing
+// gates (send gate, suppression, quiet hours, outbound mode). Nothing here
+// suppresses a number or sets a terminal disposition except wrong_person, which
+// closes THIS property exactly as the eight-answer wrong-number route does.
+// ----------------------------------------------------------------------------
+
+type NineStepArgs = {
+  input: AiDispatchInput;
+  property: AiDispatchPropertyGateRow;
+  claim: { claimId: string | null; claimedAt?: string | null };
+  runCtx?: MaybeRunContext;
+  /** Absent on the reply-ineligible (decoupled) path: no reply can be sent. */
+  templateCtx?: TemplateStepContext;
+  /** The org's escalation phrases (the same list PR 2's price-keyword decision reads). */
+  escalationKeywords?: ReadonlyArray<string> | null;
+  /** Reply-ineligible path only: the skip classifier's reason (e.g. `outside_business_hours`). */
+  replyIneligibleReason?: string;
+  /** Test seam: the clock the deferral reads. */
+  now?: Date;
+};
+
+/** A hot reply whose lead changed after the hand-off (someone acted on it): the text is dropped. */
+const NINE_HOT_REPLY_CONTEXT_CHANGED = "nine_hot_reply_context_changed";
+/** A deferred nine-question reply whose lead changed while it waited: a person looks. */
+export const NINE_DEFERRED_CONTEXT_CHANGED = "nine_deferred_context_changed";
+/** The repeat-no rule could not stop the drip after marking the lead not interested. */
+export const NINE_REPEAT_NO_DRIP_STOP_FAILED = "nine_repeat_no_drip_stop_failed";
+const NINE_REPEAT_NO_PAUSE_REASON = "status_terminal" as const;
+/** Loop bound only (one inbound is deferred at most this many times), not a send cap. */
+export const NINE_DEFER_MAX = 3;
+/** Wait this long past the moment both windows open before re-dispatching. */
+const NINE_DEFER_BUFFER_SECONDS = 5 * 60;
+const NINE_DEFER_STEP_SECONDS = 15 * 60;
+const NINE_DEFER_HORIZON_SECONDS = 48 * 60 * 60;
+
+/**
+ * Why a nine-question reply was not sent, when the ONLY reason is a closed send
+ * window: business hours (the reply-ineligible skip), the recipient's local
+ * window, or the reply delay clamped to 0 at the window's edge (delay.ts clamps
+ * to 0 whenever the window is closed or about to close). Anything else (Florida
+ * cap, draft-only mode, a repeat, a gate) is not deferrable.
+ */
+export function isNineDeferrableNotSent(why: string, replyIneligibleReason?: string): boolean {
+  if (why === "reply_ineligible") return replyIneligibleReason === "outside_business_hours";
+  return (
+    why === "quiet_hours_recipient:outside_window" ||
+    why === "delay_not_applied" ||
+    // Late, window-only refusals from inside the send path / the provider fence.
+    why === NINE_WINDOW_CLOSED ||
+    why === `skipped:${NINE_WINDOW_CLOSED}` ||
+    why === NINE_WINDOW_CLOSED_AT_FENCE ||
+    why === `skipped:${NINE_WINDOW_CLOSED_AT_FENCE}`
+  );
+}
+
+/** A send refused ONLY because a send window is closed (see runApprovedTemplateStep `windowDeferrable`). */
+export const NINE_WINDOW_CLOSED = "nine_window_closed";
+/** The same, refused at the provider fence: this attempt's own pending row was written first. */
+export const NINE_WINDOW_CLOSED_AT_FENCE = "nine_window_closed_at_fence";
+/** B-1: a v2 reply refused because the property's state (its time zone) cannot be read. */
+export const NINE_WINDOW_UNKNOWN_STATE = "nine_window_unknown_state";
+
+/**
+ * Seconds from `now` until both the property's business-hours window and the
+ * recipient's local window are open (plus a small buffer), or null when they
+ * never are within 48 hours (unknown state / area code). Steps in 15-minute
+ * increments so DST and multi-zone area codes need no date math.
+ */
+export function secondsUntilNineSendWindow(
+  propertyState: string | null | undefined,
+  recipientPhone: string | null | undefined,
+  now: Date,
+): number | null {
+  for (let t = NINE_DEFER_STEP_SECONDS; t <= NINE_DEFER_HORIZON_SECONDS; t += NINE_DEFER_STEP_SECONDS) {
+    const at = new Date(now.getTime() + t * 1000);
+    if (checkQuietHours(propertyState, at).ok && checkRecipientQuietHours(recipientPhone, at).ok) {
+      return t + NINE_DEFER_BUFFER_SECONDS;
+    }
+  }
+  return null;
+}
+
+/**
+ * Held for Jarrad exactly as the eight-answer path holds a price keyword: a hot hold
+ * (`keyword:price_offer`, one alert), no reply, no drip.
+ */
+async function holdNinePriceKeyword(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  detail: Record<string, unknown>,
+): Promise<AiDispatchOutcome> {
+  const keywordReason = `keyword:${HOT_KEYWORD_TIER}`;
+  await trace(supabase, {
+    kind: "hold",
+    name: "hot_wins",
+    result: "held",
+    detail: { ...detail, keyword: HOT_KEYWORD_TIER },
+  }, a.runCtx);
+  const flagOk = await markPropertyNeedsAttention(supabase, a.input.propertyId, keywordReason, a.runCtx);
+  await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: "escalated", flagOk });
+  return { outcome: "escalated", reason: keywordReason };
+}
+
+/** A price keyword (or org escalation phrase of that tier) in the text; same test PR 2 uses. */
+function hasHotPriceKeyword(inboundBody: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
+  return isPriceKeyword(inboundBody, escalationKeywords);
+}
+
+/**
+ * PR 2's hot-wins precedence for the nine answers: stop (asked_stop, hostile) and wrong person
+ * always beat hot; talked_price / open_to_selling already are hot; every other answer yields to
+ * a hot price keyword. Same phrase test PR 2 uses for the eight-answer path.
+ */
+const NINE_YIELDS_TO_HOT: ReadonlySet<string> = new Set(["maybe_later", "not_interested", "asked_who", "confirmed_owner", "just_ok", "needs_person"]);
+function nineYieldsToHotKeyword(answer: string, inboundBody: string, escalationKeywords?: ReadonlyArray<string> | null): boolean {
+  return NINE_YIELDS_TO_HOT.has(answer) && hasHotPriceKeyword(inboundBody, escalationKeywords);
+}
+
+async function nineHoldAndComplete(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  reason: string,
+  outboundMessageId?: string | null,
+): Promise<AiDispatchOutcome> {
+  const flagOk = await holdWithRetry(supabase, a.input.propertyId, reason, a.runCtx);
+  await completeClaim(supabase, a.input.propertyId, {
+    claimId: a.claim.claimId,
+    outcome: "escalated",
+    flagOk,
+    ...(outboundMessageId ? { outboundMessageId } : {}),
+  });
+  return { outcome: "escalated", reason };
+}
+
+/** Same refusal record the nurture auto-drip writes: a trace step plus a flag a person sees. */
+async function nineRecordDrip(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  dripName: string,
+  result: NineDripResult,
+): Promise<boolean> {
+  if (result.status === "refused") {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "error",
+      detail: { reason: result.reason, route: dripName, engine: "nine_questions" },
+    }, a.runCtx);
+    return markPropertyNeedsAttention(
+      supabase,
+      a.input.propertyId,
+      result.reason === "drip_paused" ? "drip_paused" : `drip_enroll_failed:${result.reason}`,
+      a.runCtx,
+    );
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "drip_enrolled",
+    result: "applied",
+    detail: {
+      status: result.status,
+      route: dripName,
+      engine: "nine_questions",
+      sequenceId: result.sequenceId,
+      ...(result.status === "enrolled" ? { enrollmentId: result.enrollmentId } : {}),
+    },
+  }, a.runCtx);
+  return true;
+}
+
+/**
+ * Hot answers (open_to_selling, talked_price) reuse TODAY's new_lead path unchanged:
+ * promote atomically when the org's new_lead automation switch is on, otherwise
+ * record the proposal and hold for a person. After a promotion it uses PR 2's hand-off
+ * (`assignHotLeadToOwner`). This stays the single seam for hot handling.
+ */
+async function routeNineHot(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  r: { classificationRunId: string; evaluationRevision: number; result: NineQuestionResult },
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input } = a;
+  const chosen = r.result.chosen!;
+  const thresholds = await loadOrgThresholdMap(supabase, a.property.org_id);
+  const newLead = thresholds.new_lead;
+  const args = {
+    propertyId: input.propertyId,
+    conversationId: input.conversationId,
+    inboundMessageId: input.inboundMessageId,
+    classificationRunId: r.classificationRunId,
+    outcome: "new_lead" as const,
+    nativeConfidence: chosen.probability,
+    thresholdAtDecision: r.result.cutoff,
+    // The old new_lead settings version belongs to the 0.9 cutoff, not this 0.6 decision.
+    thresholdVersion: null,
+    expectedRevision: r.evaluationRevision,
+  };
+  if (newLead?.automationEnabled === true) {
+    const applyResult = await applyJevLeadDecisionAtomically(supabase, args);
+    if (applyResult.status === "applied" || applyResult.status === "already_qualified" || applyResult.status === "replayed") {
+      await trace(supabase, { kind: "action", name: "promote_new_lead", result: "applied", detail: { status: applyResult.status, engine: "nine_questions" } }, a.runCtx);
+      if (applyResult.status === "applied") {
+        await recordLeadEvent({
+          propertyId: input.propertyId,
+          actorType: "system",
+          eventType: LEAD_EVENT_TYPES.QUALIFIED,
+          payload: { from: "prospect", to: "new_lead" },
+        });
+      }
+      let handoffStatus: string | null = null;
+      const handoffEscalation = await handOffHotLead(supabase, input.propertyId, a.claim, a.runCtx, input.inboundMessageId, (s) => {
+        handoffStatus = s;
+      });
+      // A failed hand-off is a hot hold for a person: no reply text (the alert still fires).
+      if (handoffEscalation) return handoffEscalation;
+      // The approved hot reply (2026-10-20) goes out only AFTER the promotion and hand-off
+      // above, so it can never delay or block the alert. It is skipped when the lead was
+      // already a lead (already_qualified: a person already has it) or belongs to someone
+      // else; either way the lead stays hot exactly as before.
+      const action = actionForNineAnswer(r.result.answer);
+      if (
+        action.kind === "hot" &&
+        action.reply &&
+        applyResult.status !== "already_qualified" &&
+        handoffStatus !== "owned_by_someone_else"
+      ) {
+        // The baseline every later check compares against: read right after the hand-off.
+        const { data: afterHandoff } = await supabase
+          .from("properties")
+          .select("decision_context_revision")
+          .eq("id", input.propertyId)
+          .maybeSingle();
+        if (afterHandoff) return sendNineHotReply(supabase, a, action.reply, r, afterHandoff.decision_context_revision);
+      }
+      if (action.kind === "hot" && action.reply) {
+        await trace(supabase, {
+          kind: "reply",
+          name: "nine_hot_reply",
+          result: "skipped",
+          detail: { engine: "nine_questions", reply: action.reply, why: applyResult.status === "already_qualified" ? "already_a_lead" : handoffStatus === "owned_by_someone_else" ? "owned_by_someone_else" : "revision_unreadable" },
+        }, a.runCtx);
+      }
+      await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "auto_closed" });
+      return { outcome: "auto_closed", reason: "model:new_lead_promoted" };
+    }
+    const reason = "jev_new_lead_promotion_failed";
+    await trace(supabase, { kind: "action", name: "promote_new_lead", result: "error", detail: { status: applyResult.status, engine: "nine_questions" } }, a.runCtx);
+    let ourFlagAt: string | null = null;
+    const flagOk = await markPropertyNeedsAttention(supabase, input.propertyId, reason, a.runCtx, NO_GUARD, (at) => {
+      ourFlagAt = at;
+    });
+    await recordHotFailure(supabase, input.propertyId, input.inboundMessageId, reason, ourFlagAt);
+    await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: applyResult.status, flagOk });
+    return { outcome: "escalated", reason };
+  }
+  // Switch off: a person decides (the proposal row is the "needs a decision" record).
+  await proposeJevLeadDecision(supabase, args);
+  await trace(supabase, { kind: "hold", name: "nine_hot_lead", result: "held", detail: { reason: "hot_lead", answer: r.result.answer } }, a.runCtx);
+  return nineHoldAndComplete(supabase, a, "hot_lead");
+}
+
+/**
+ * A nine-question reply that could not go out only because the send window was
+ * closed (see isNineDeferrableNotSent): instead of holding for a person, release
+ * the claim and ask the caller to dispatch the same inbound again when both the
+ * business-hours and the recipient's windows are open. The deferred run re-checks
+ * the lead's decision_context_revision first (runNineQuestionsStep). Returns null
+ * when it cannot be deferred (other reason, no computable window, loop bound hit):
+ * the caller then holds exactly as before.
+ */
+async function maybeDeferNineReply(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  why: string,
+  decision: { evaluationRevision: number; classificationRunId: string; result: NineQuestionResult },
+  /** Hot reply only: the revision verified right after the hand-off (or carried by the hot deferral). */
+  opts: { hotBaseline?: number } = {},
+): Promise<AiRetryOutcome | null> {
+  if (!isNineDeferrableNotSent(why, a.replyIneligibleReason)) return null;
+  // A dispatch running without the reply delay (none configured, lookup failed, workflow
+  // could not start) never sends an approved template: only the clamp-to-0 case may wait.
+  if (a.input.replyDelayBypassed && a.input.replyDelayBypassReason !== "delay_not_applied") return null;
+  if (!a.input.inboundMessageId) return null;
+  const count = a.input.nineDeferral?.count ?? a.input.nineDeferCount ?? 0;
+  if (count >= NINE_DEFER_MAX) return null;
+  // The revision the deferred run must find. Our own refused pending row (fence refusal only)
+  // moved it exactly once; anything else moving it means the lead changed: hold, don't defer.
+  const ownRowBumps = why.endsWith(NINE_WINDOW_CLOSED_AT_FENCE) ? 1 : 0;
+  const { data: liveRev, error: liveRevError } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", a.input.propertyId)
+    .maybeSingle();
+  if (liveRevError || !liveRev) return null;
+  // A hot reply waits AFTER the promotion / hand-off, which move the revision themselves:
+  // the deferred run instead requires the revision read here to be unchanged.
+  // A hot reply: promotion and hand-off already moved the revision, so the baseline is the one
+  // read right after the hand-off (or carried by the previous hot deferral). Only this attempt's
+  // own refused pending row may have moved it since; anything else (a reassignment, a person
+  // texting) drops the text instead of becoming the new baseline.
+  const expected = opts.hotBaseline !== undefined ? opts.hotBaseline : decision.evaluationRevision;
+  if (liveRev.decision_context_revision !== expected + ownRowBumps) return null;
+  const phone = await resolveSendDestinationPhone(supabase, a.input);
+  const delaySeconds = secondsUntilNineSendWindow(a.property.state, phone, a.now ?? new Date());
+  if (delaySeconds === null) return null;
+  // Released so the deferred re-dispatch of this same inbound can claim it again. As the
+  // other retry paths: a lease that cannot be released means the retry could never run, so
+  // nothing is scheduled and the caller holds for a person.
+  const errorMessage = `nine_reply_deferred:${why}`;
+  let released = await completeClaim(supabase, a.input.propertyId, {
+    claimId: a.claim.claimId,
+    outcome: "skipped",
+    errorMessage,
+    releaseLease: true,
+  });
+  if (!released) released = await expireAiResponseClaimLease(supabase, { claimId: a.claim.claimId, errorMessage });
+  if (!released) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "retry_unschedulable",
+      result: "error",
+      detail: { engine: "nine_questions", why: "nine_reply_deferred" },
+    }, a.runCtx);
+    return null;
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_reply_deferred",
+    result: "applied",
+    detail: { engine: "nine_questions", why, delaySeconds, deferral: count + 1 },
+  }, a.runCtx);
+  return {
+    outcome: "retry",
+    reason: "nine_reply_deferred",
+    attempt: a.input.retryAttempt ?? 0,
+    delaySeconds,
+    nineDeferral: {
+      count: count + 1,
+      revision: liveRev.decision_context_revision,
+      result: decision.result,
+      classificationRunId: decision.classificationRunId,
+      ...(opts.hotBaseline !== undefined ? { hotReply: true } : {}),
+    },
+  };
+}
+
+/**
+ * The approved hot reply (Jarrad 2026-10-20) for asked_offer / named_price / open_to_selling.
+ * Called only after the hot promotion + hand-off succeeded (or, on a deferred run, after the
+ * revision check proved nothing changed since). Sent as fixed approved text through the same
+ * send path as the nine identity reply, so every guard applies: consent / opt-out / suppression
+ * and the send gates in sendResponderMessage, the outbound-mode hold, business hours and the
+ * recipient's window + Florida cap (a closed window defers, never holds), the repeat guard
+ * (the same text never goes twice to a property) and the provider fence.
+ *
+ * Never an extra hold: whatever happens to the text, the lead is already hot and on My Leads,
+ * so a text that cannot go out is traced and the claim is closed (the send path's own guards
+ * keep any flag they write themselves, e.g. the outbound-mode draft hold).
+ */
+async function sendNineHotReply(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  key: NineHotReply,
+  r: { classificationRunId: string; evaluationRevision: number; result: NineQuestionResult },
+  /** The lead's revision right after the hot hand-off (or carried by the hot deferral). */
+  baseline: number,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, property, claim, runCtx, templateCtx } = a;
+  const body = NINE_HOT_REPLY_TEXTS[key];
+  const promoted: AiDispatchOutcome = { outcome: "auto_closed", reason: "model:new_lead_promoted" };
+  const notSent = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
+    // A deferred run whose lead changed at the fence: someone acted on the lead, so drop the text.
+    if (why !== NINE_DEFERRED_CONTEXT_CHANGED && why !== NINE_HOT_REPLY_CONTEXT_CHANGED) {
+      const deferred = await maybeDeferNineReply(supabase, a, why, r, { hotBaseline: baseline });
+      if (deferred) return deferred;
+    }
+    await trace(supabase, {
+      kind: "reply",
+      name: "nine_hot_reply",
+      result: "skipped",
+      detail: { engine: "nine_questions", reply: key, why },
+    }, runCtx);
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed", errorMessage: `nine_hot_reply_not_sent:${why}` });
+    return promoted;
+  };
+  if (!templateCtx) return notSent("reply_ineligible");
+  if (input.replyDelayBypassed) return notSent(input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE);
+  const safety = validateAiReplyBody(body);
+  if (!safety.ok) return notSent(`safety:${safety.reason}`);
+  // Repeat guard: this exact text already went (or may have gone) to this property: never again.
+  const repeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, null, body);
+  if (repeat !== "no") return notSent(repeat === "error" ? `${TEMPLATE_ALREADY_SENT}:lookup_failed` : TEMPLATE_ALREADY_SENT);
+  // Fixed text, not a library template: check the recipient's clock and the Florida cap here
+  // (the send path and the provider fence check them again).
+  const window = await evaluateRecipientWindow(supabase, input);
+  if (!window.ok) return notSent(`quiet_hours_recipient:${window.why}`);
+  // Last look before sending: anyone who touched the lead since the hand-off (a reassignment,
+  // a person texting) owns the conversation now, so the text is dropped.
+  const { data: live, error: liveError } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", input.propertyId)
+    .maybeSingle();
+  if (liveError || !live || live.decision_context_revision !== baseline) return notSent(NINE_HOT_REPLY_CONTEXT_CHANGED);
+  const sent = await sendResponderMessage(supabase, {
+    runContext: runCtx,
+    input,
+    body,
+    model: templateCtx.model,
+    confidence: 1,
+    sentiment: "neutral",
+    turn: templateCtx.currentTurn + 1,
+    source: "llm",
+    orgId: property.org_id,
+    claimStartedAt: templateCtx.claimStartedAt,
+    outboundMode: templateCtx.outboundMode,
+    replyKind: "nine_hot_reply",
+    windowDeferrable: true,
+    approvedFixedText: true,
+  });
+  if (sent.outcome === "sent") {
+    await trace(supabase, {
+      kind: "reply",
+      name: "nine_hot_reply",
+      result: "applied",
+      detail: { engine: "nine_questions", reply: key },
+    }, runCtx);
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed", outboundMessageId: sent.messageId });
+    return promoted;
+  }
+  if (sent.outcome === "skipped" && (sent.reason === NINE_WINDOW_CLOSED || sent.reason === NINE_WINDOW_CLOSED_AT_FENCE || sent.reason === NINE_DEFERRED_CONTEXT_CHANGED)) {
+    return notSent(sent.reason);
+  }
+  // Not sent and nothing stored (a transient provider problem): never re-run the hot path for
+  // a text. A repeat dispatch would find the lead already promoted and send nothing anyway.
+  if (sent.outcome === "retry") return notSent(`send_retry:${sent.reason}`);
+  // escalated / skipped by a guard: the send path already settled its own flag, if any.
+  await trace(supabase, {
+    kind: "reply",
+    name: "nine_hot_reply",
+    result: "skipped",
+    detail: { engine: "nine_questions", reply: key, why: `send_${sent.outcome}`, reason: sent.reason },
+  }, runCtx);
+  return settleClaimForSendOutcome(supabase, claim.claimId, sent, { orgId: property.org_id, input, body, runContext: runCtx });
+}
+
+/**
+ * Jarrad's rule, approved verbatim 2026-10-20:
+ * "If the homeowner says no again after already getting our not-interested reply, stop their drip, mark them Not interested, and send nothing."
+ *
+ * Runs only for a `not_interested` answer (at or above the cutoff: the engine's own
+ * pick, never a keyword) after hostile / stop / price precedence. Returns null when
+ * the property has not had the approved not-interested reply yet (the first no), or
+ * its history is unreadable (the existing repeat guard then fails closed).
+ */
+async function routeNineRepeatNotInterested(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  r: { classificationRunId: string; evaluationRevision: number },
+): Promise<AiDispatchOutcome | null> {
+  const { input, property, claim, runCtx } = a;
+  // Proof the first reply was RECEIVED: the provider accepted it. Anything less (none, only
+  // pending / queued / failed rows, an unreadable history) is not this rule: the existing path
+  // runs, and its repeat guard holds for a person whenever any copy might have gone out.
+  if ((await notInterestedReplyAccepted(supabase, property.org_id, input.propertyId)) !== "yes") return null;
+  const thresholds = await loadOrgThresholdMap(supabase, property.org_id);
+  if (thresholds.not_interested?.automationEnabled !== true) {
+    return nineHoldAndComplete(supabase, a, "nine_automation_disabled:not_interested");
+  }
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_repeat_not_interested",
+    result: "applied",
+    detail: { engine: "nine_questions", rule: NINE_REPEAT_NOT_INTERESTED_RULE },
+  }, runCtx);
+  const reason = "nine_questions:not_interested_again";
+  // The sanctioned disposition path (DNC lock, opt-out and stale-revision guards in the RPC).
+  const closed = await setResponderDispo(supabase, {
+    runContext: runCtx,
+    propertyId: input.propertyId,
+    conversationId: input.conversationId ?? null,
+    inboundMessageId: input.inboundMessageId ?? null,
+    dispo: "not_interested",
+    reason,
+    expectedRevision: r.evaluationRevision,
+    undo: { orgId: property.org_id, classificationRunId: r.classificationRunId },
+  });
+  await traceDisposition(supabase, "not_interested", closed, false, runCtx);
+  if (closed.updated && input.inboundMessageId) {
+    await maybeAutoAcceptJevReview(supabase, input.inboundMessageId, r.classificationRunId);
+  }
+  const outcome = closeOutcome(closed, reason);
+  if (closed.updated || (!closed.updated && closed.reason === "already_terminal")) {
+    // Stop the drip for good (the paused "Not interested" enrolment included); the
+    // helper records the lead event.
+    try {
+      const stopped = await pausePropertyEnrollments(supabase, {
+        propertyId: input.propertyId,
+        // An enrolment pause reason (sequences/pause-rules), not a hold reason.
+        reason: NINE_REPEAT_NO_PAUSE_REASON,
+        permanent: true,
+      });
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_stopped",
+        result: "applied",
+        detail: { engine: "nine_questions", stopped: stopped.paused },
+      }, runCtx);
+    } catch (error) {
+      reportError(error, { tags: { surface: "nine_repeat_not_interested_drip_stop" }, extra: { propertyId: input.propertyId } });
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_stopped",
+        result: "error",
+        detail: { engine: "nine_questions" },
+      }, runCtx);
+      return nineHoldAndComplete(supabase, a, NINE_REPEAT_NO_DRIP_STOP_FAILED);
+    }
+  }
+  await completeClaim(supabase, input.propertyId, {
+    claimId: claim.claimId,
+    outcome: claimOutcomeOf(outcome),
+    errorMessage: dispositionClaimError(closed),
+  });
+  return outcome;
+}
+
+/**
+ * Refused at the provider fence because the lead changed after a deferral: never send the
+ * stale decision and never drop it silently. Release the claim and re-dispatch the same
+ * inbound shortly as a FRESH decision (the next run re-classifies and every gate applies).
+ * Past the loop bound, or if the lease cannot be released, a person looks.
+ */
+async function redispatchNineFresh(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  decision: { evaluationRevision: number; classificationRunId: string; result: NineQuestionResult },
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const count = a.input.nineDeferral?.count ?? a.input.nineDeferCount ?? 0;
+  if (count >= NINE_DEFER_MAX || !a.input.inboundMessageId) {
+    return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+  }
+  const errorMessage = "nine_reply_deferred:redispatch_fresh";
+  let released = await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: "skipped", errorMessage, releaseLease: true });
+  if (!released) released = await expireAiResponseClaimLease(supabase, { claimId: a.claim.claimId, errorMessage });
+  if (!released) return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_reply_deferred",
+    result: "applied",
+    detail: { engine: "nine_questions", why: "context_changed_at_fence", redispatch: "fresh", deferral: count + 1 },
+  }, a.runCtx);
+  return {
+    outcome: "retry",
+    reason: "nine_reply_deferred",
+    attempt: a.input.retryAttempt ?? 0,
+    delaySeconds: REPLY_RETRY_DELAY_SECONDS,
+    nineDeferral: {
+      count: count + 1,
+      revision: decision.evaluationRevision,
+      result: decision.result,
+      classificationRunId: decision.classificationRunId,
+      fresh: true,
+    },
+  };
+}
+
+/**
+ * Routing v2 cutover (a): the live v2 engine for one inbound, behind routing_v2_flags.
+ *
+ * Returns null (= run today's nine-question step, byte for byte) unless the org's flags read
+ * questions_live AND this property is canary-eligible. Otherwise:
+ *   classify (Jev, Haiku per policy, DealMachine per price_check)
+ *   -> immutable live decision row (routing_v2_live_decisions)
+ *   -> one atomic transition from the STORED row (retire drip, enroll, queue reply + alerts)
+ * Seller texts and owner alerts are queued in routing_v2_outbox and delivered by the outbox
+ * consumer, which re-checks flags, newer replies, takeover and suppression at send time.
+ * Anything that cannot be carried out exactly holds for a person with an existing reason.
+ */
+export async function runRoutingV2LiveStep(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
+  const outcome = await runRoutingV2LiveStepInner(supabase, a);
+  // H1(iii): per-property v2 decisions see each other. Texts in a burst are decided in
+  // parallel: one can write a person hold (e.g. a possible stop) while another enrolls a drip.
+  // Every v2 decision ends by re-reading the hold; a held lead keeps no active drip (paused for
+  // the person, as the webhook pauses it). Whichever decision finishes last sees the other's
+  // write, so the end state is always "held, drip paused". The outbox also refuses an auto
+  // reply to a held lead (prepare). Jarrad Q2 default: a possible-stop hold stays with the person.
+  if (outcome && outcome.outcome !== "retry" && a.input.routingV2Backfill?.mode !== "classify_only") await pauseDripsIfHeld(supabase, a.input.propertyId);
+  return outcome;
+}
+
+async function pauseDripsIfHeld(supabase: SupabaseClient<Database>, propertyId: string): Promise<void> {
+  try {
+    const { data } = await supabase.from("properties").select("needs_human_attention").eq("id", propertyId).maybeSingle();
+    if (data?.needs_human_attention !== true) return;
+    await pausePropertyEnrollments(supabase, { propertyId, reason: "inbound_reply" });
+  } catch (e) {
+    reportError(e, { tags: { surface: "routing_v2_pause_drips_if_held" }, extra: { propertyId } });
+  }
+}
+
+async function runRoutingV2LiveStepInner(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
+  const { input, property, runCtx } = a;
+  // A legacy deferral already owns this inbound's decision.
+  if (input.nineDeferral || !input.inboundMessageId) return null;
+  const flagRead = await readRoutingV2FlagsResult(supabase, property.org_id);
+  if (!flagRead.ok) {
+    // Unreadable flags (a database blip), not "off": a property v2 already routed (it has a v2
+    // enrollment, which the webhook just paused) must not fall back to the legacy engine, which
+    // neither retires that drip nor holds (H1(i): a paused drip on a lead nobody owns). A person
+    // looks. A property v2 never touched keeps today's behaviour exactly.
+    // "v2 already routed" = a v2 enrollment, a v2 decision / audit row, or a v2 outbox row (N-2).
+    const loose = supabase as unknown as {
+      from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> }; limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> } } };
+    };
+    const traces = await Promise.all([
+      loose.from("sequence_enrollments").select("id").eq("property_id", input.propertyId).eq("routing_v2_engine", "v2").limit(1),
+      loose.from("routing_v2_live_decisions").select("id").eq("property_id", input.propertyId).limit(1),
+      loose.from("routing_v2_outbox").select("id").eq("property_id", input.propertyId).limit(1),
+    ]);
+    if (input.routingV2Backfill) return null; // the caller skips it (never legacy, never a hold from classify-only)
+    if (traces.some((t) => t.error || (t.data ?? []).length > 0)) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    return null;
+  }
+  const flags: RoutingV2Flags = flagRead.flags;
+  if (!flags.questions_live || !isV2Eligible(flags, input.propertyId)) return null;
+  const inboundMessageId = input.inboundMessageId;
+
+  const { data: revisionRow, error: revisionError } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", input.propertyId)
+    .maybeSingle();
+  if (revisionError || !revisionRow) return backfillClassifyOnlySkipOr(supabase, a, () => nineHoldAndComplete(supabase, a, "nine_needs_person"));
+  const expectedRevision = revisionRow.decision_context_revision;
+
+  // Backfill apply of a text an earlier classify-only run decided: record that decision now,
+  // exactly as live (a safety decision with its atomic hold), then carry it out. No second
+  // Jev / Haiku call. The row keeps the classify-time revision, so a lead that changed since
+  // (a person acted, a text went out) makes the transition hold for a person instead of acting.
+  if (input.routingV2Backfill && input.routingV2Backfill.mode !== "classify_only") {
+    // Newest-inbound fence (Astra review 3): a newer seller text on this lead owns it. Checked
+    // before anything is recorded, so no hold, suppression, close or alert comes from an older text.
+    const newer = await backfillNewerInboundExists(supabase, input.propertyId, inboundMessageId);
+    if (newer !== "no") {
+      await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_NEWER_INBOUND });
+      return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_NEWER_INBOUND };
+    }
+    if (input.routingV2Backfill.resumeRecordedDecision) {
+      const recordedEarlier = await readLiveV2Evidence(supabase, inboundMessageId);
+      if (recordedEarlier && (recordedEarlier.status === "decided" || recordedEarlier.status === "failed")) {
+        if (recordedEarlier.property_id !== input.propertyId || recordedEarlier.org_id !== property.org_id) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+        return applyRoutingV2LiveEvidence(supabase, a, flags, recordedEarlier);
+      }
+    }
+  }
+  const storedRow = input.routingV2Backfill?.mode !== "classify_only" ? input.routingV2Backfill?.storedDecisionRow : undefined;
+  if (storedRow) {
+    if (storedRow.property_id !== input.propertyId || storedRow.org_id !== property.org_id || storedRow.inbound_message_id !== inboundMessageId) {
+      return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    }
+    if (input.routingV2Backfill?.mode === "sort_only" && storedRow.action) {
+      storedRow.action = withSortOnlyPriceAlert(storedRow.action as V2Action);
+    }
+    const replayHold = v2SafetyHoldReason({
+      kind: storedRow.status === "failed" ? "failed" : "decided",
+      reason: (storedRow.failure_reason as string | null) ?? undefined,
+      action: (storedRow.action as V2Action | null) ?? null,
+    }, input);
+    const replayed = await recordLiveV2DecisionRow(supabase, storedRow, replayHold, { backfillNewestFence: true });
+    if (replayed === "newer_inbound") {
+      await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_NEWER_INBOUND });
+      return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_NEWER_INBOUND };
+    }
+    if (replayed === "hold_failed") {
+      // Exactly the live handling (#956): drips paused, safety obligation (or fallback), claim marker.
+      return failClosedUnrecordedSafetyHold(supabase, a, inboundMessageId, replayHold ?? "nine_needs_person",
+        "routing v2 backfill: replayed safety decision and hold could not be recorded");
+    }
+    if (replayed === "failed") return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    const stored = await readLiveV2Evidence(supabase, inboundMessageId);
+    if (!stored || stored.property_id !== input.propertyId || stored.org_id !== property.org_id) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    return applyRoutingV2LiveEvidence(supabase, a, flags, stored);
+  }
+
+  let classification: Exclude<V2Classification, { kind: "off" }>;
+  // Jev attempts actually made, for the spend ledger even if something after Jev throws.
+  let jevAttempts: readonly JevAttemptOutcome[] = [];
+  try {
+    const { data: source } = await supabase.from("messages").select("created_at").eq("id", inboundMessageId).maybeSingle();
+    const thread = await buildTwoWayThreadState(supabase, {
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      excludeMessageId: inboundMessageId,
+      sourceCreatedAt: source?.created_at ?? null,
+    });
+    const deps = v2ProviderDeps({
+      jev: { fetch, apiKey: process.env.TYPESAFE_API_KEY ?? "", ...V2_LIVE_JEV_POLICY },
+      haiku: { fetch, apiKey: process.env.ANTHROPIC_API_KEY_SANDRA ?? process.env.ANTHROPIC_API_KEY ?? "" },
+      lookupValue: () => routingV2PropertyValue(supabase, property.org_id, input.propertyId),
+    });
+    const askJevCounted = deps.jev;
+    deps.jev = async (request) => {
+      try {
+        const res = await askJevCounted(request);
+        jevAttempts = res.attempts ?? ["ok"];
+        return res;
+      } catch (e) {
+        if (e instanceof JevAttemptsError) jevAttempts = e.attempts;
+        throw e;
+      }
+    };
+    const result = await classifyV2(
+      { flags, propertyId: input.propertyId, reply: input.inboundBody, thread, numberSourceQuestion: true },
+      deps,
+    );
+    // classifyV2 only returns off when the flags say so; they were just read as on.
+    classification = result.kind === "off" ? { ...V2_JEV_FAILED, jevAttempts } : result;
+  } catch {
+    // Thrown before Jev (thread build) = no attempt and no Jev ledger row; after it = its attempts.
+    classification = { ...V2_JEV_FAILED, jevAttempts };
+  }
+
+  await recordV2ModelSpend(supabase, { orgId: property.org_id, propertyId: input.propertyId, inboundMessageId }, classification,
+    (e) => reportError(e, { tags: { surface: "routing_v2_spend_ledger" }, extra: { inboundMessageId } }));
+  if (input.routingV2Backfill?.mode === "sort_only" && classification.kind === "decided") {
+    classification = { ...classification, action: withSortOnlyPriceAlert(classification.action) };
+  }
+  const decisionContext = { orgId: property.org_id, propertyId: input.propertyId, conversationId: input.conversationId ?? null, inboundMessageId, expectedRevision };
+  if (input.routingV2Backfill?.mode === "classify_only") {
+    // Backfill classify-only (Opus review B1): the decision row goes to the caller, NOT to the
+    // recorder, so no decision row, hold, drip pause, reply cancel, alert or obligation is written.
+    // A later backfill apply records and carries out this exact row.
+    try {
+      await input.routingV2Backfill.onClassified?.(liveDecisionRow(decisionContext, classification) as unknown as Record<string, unknown>);
+    } catch {
+      return backfillClassifyOnlySkipOr(supabase, a, () => nineHoldAndComplete(supabase, a, "nine_needs_person"));
+    }
+    await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_CLASSIFY_ONLY });
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_ONLY };
+  }
+  // Astra review of b6a00a0a2f17 (A): a safety decision is recorded together with its effects.
+  const safetyHoldReason = v2SafetyHoldReason(classification, input);
+  // Backfill (apply / sort-only): the newest-inbound check is repeated INSIDE the recorder's
+  // transaction, so a seller text that arrived while Jev was classifying wins (Astra 3rd pass, 1).
+  // (The live call keeps its exact four-argument form.)
+  const recorded = input.routingV2Backfill
+    ? await recordLiveV2Decision(supabase, decisionContext, classification, safetyHoldReason, { backfillNewestFence: true })
+    : await recordLiveV2Decision(supabase, decisionContext, classification, safetyHoldReason);
+  if (recorded === "newer_inbound") {
+    await completeClaim(supabase, input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_NEWER_INBOUND });
+    return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_NEWER_INBOUND };
+  }
+  if (recorded === "hold_failed") {
+    // Nothing was recorded: no decision row, no hold. Fail closed (drips paused, obligation or its
+    // fallback, claim v2_safety_hold_failed); the apply gate and the sweep re-attempt the hold.
+    return failClosedUnrecordedSafetyHold(supabase, a, inboundMessageId, safetyHoldReason ?? "nine_needs_person",
+      "routing v2: safety decision and hold could not be recorded");
+  }
+  await testBarrier("dispatch:after_decision", { propertyId: input.propertyId, inboundMessageId });
+  // A duplicate never acts on this run's classification: only the stored original does.
+  const evidence = recorded === "failed" ? null : await readLiveV2Evidence(supabase, inboundMessageId);
+  await trace(supabase, {
+    kind: "action",
+    name: "routing_v2_live_decision",
+    result: evidence ? "applied" : "error",
+    detail: { engine: "routing_v2", recorded, road: evidence?.road ?? null, status: evidence?.status ?? null },
+  }, runCtx);
+  if (!evidence || evidence.property_id !== input.propertyId || evidence.org_id !== property.org_id) {
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  return applyRoutingV2LiveEvidence(supabase, a, flags, evidence);
+}
+
+/** Is the lead's current hold the one written for this inbound (hold_inbound_message_id)? */
+async function backfillHoldIsFor(supabase: SupabaseClient<Database>, propertyId: string, inboundMessageId: string | null): Promise<boolean> {
+  if (!inboundMessageId) return false;
+  const { data, error } = await (supabase as unknown as { from: (t: string) => any }) // eslint-disable-line @typescript-eslint/no-explicit-any
+    .from("properties").select("hold_inbound_message_id").eq("id", propertyId).maybeSingle();
+  return !error && (data as { hold_inbound_message_id?: string | null } | null)?.hold_inbound_message_id === inboundMessageId;
+}
+
+/** A newer inbound SMS on the property than this one ("yes" / "no" / "error" = treat as newer). */
+async function backfillNewerInboundExists(supabase: SupabaseClient<Database>, propertyId: string, inboundMessageId: string): Promise<"yes" | "no" | "error"> {
+  const { data: me, error } = await supabase.from("messages").select("created_at").eq("id", inboundMessageId).maybeSingle();
+  if (error || !me) return "error";
+  const { data: newer, error: newerError } = await supabase.from("messages").select("id, created_at")
+    .eq("property_id", propertyId).eq("direction", "inbound").eq("channel", "sms").gte("created_at", me.created_at)
+    .neq("id", inboundMessageId).limit(20);
+  if (newerError) return "error";
+  return (newer ?? []).some((m) => m.created_at > me.created_at || m.id > inboundMessageId) ? "yes" : "no";
+}
+
+/**
+ * A safety decision whose atomic hold could not be recorded: fail closed (v2 drips paused), open
+ * the unresolved safety obligation (#956), or its claim-independent fallback, and close the claim
+ * as v2_safety_hold_failed. Shared by the live recorder path and the routing v2 backfill replay,
+ * so both behave identically.
+ */
+async function failClosedUnrecordedSafetyHold(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  inboundMessageId: string,
+  holdReason: string,
+  message: string,
+): Promise<AiDispatchOutcome> {
+  const { input } = a;
+  await pauseV2DripsFailClosed(supabase, input.propertyId);
+  // Round 18: the unresolved obligation is the one source of truth; it survives any reclaim of
+  // this claim and blocks every automated send and every newer text until a hold lands.
+  const obligationRecorded = await openSafetyObligation(supabase, { propertyId: input.propertyId, inboundMessageId, reason: holdReason, source: "hold_failed" });
+  reportError(new Error(message), {
+    tags: { surface: "routing_v2_safety_decision" }, extra: { propertyId: input.propertyId, inboundMessageId, obligationRecorded },
+  });
+  if (obligationRecorded) {
+    await completeAiResponseClaim(supabase, { claimId: a.claim.claimId, outcome: "escalated", errorMessage: "v2_safety_hold_failed" });
+    return { outcome: "escalated", reason: holdReason };
+  }
+  // Opus B4 on #956 / Astra second pass at f67102de9a8f: the obligation could not be written
+  // either. The fallback records the case on the inbound in a claim-independent table (a reclaim
+  // can neither block nor erase it), and also completes this run's own claim with the marker while
+  // it still owns it (id + claimed_at compare-and-set; a reclaimed claim is left to its new run).
+  const fallbackRecorded = await markObligationUnrecorded(supabase, {
+    propertyId: input.propertyId, inboundMessageId, reason: holdReason,
+    claimId: a.claim.claimId, claimedAt: a.claim.claimedAt ?? null,
+  });
+  if (!fallbackRecorded) {
+    // Nothing durable could be written: never report success. A hard error fails this run (the
+    // claim stays processing for lease expiry and the sweep; the caller retries / redelivers).
+    throw new Error("routing v2: safety case could not be recorded (obligation and fallback both failed)");
+  }
+  return { outcome: "escalated", reason: holdReason };
+}
+
+/** Classify-only never writes a hold: a path that would hold skips the text instead (counted). */
+async function backfillClassifyOnlySkipOr(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  live: () => Promise<AiDispatchOutcome>,
+): Promise<AiDispatchOutcome> {
+  if (a.input.routingV2Backfill?.mode !== "classify_only") return live();
+  await completeClaim(supabase, a.input.propertyId, { claimId: a.claim.claimId, outcome: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE });
+  return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_CLASSIFY_UNAVAILABLE };
+}
+
+/**
+ * The hold reason a stored decision's own path writes, for a SAFETY decision (a failed
+ * classification, the stop road, a hold step); null for any other road. Mirrors
+ * applyRoutingV2LiveEvidence so the atomic hold carries the same reason that path would write.
+ */
+function v2SafetyHoldReason(
+  classification: { kind: string; reason?: string; action?: V2Action | null },
+  input: AiDispatchInput,
+): string | null {
+  const hostile = isHostileInbound(input.inboundBody)
+    ? (input.inboundMessageId ? `${HOSTILE_NEEDS_CONFIRM_REASON}:${input.inboundMessageId}` : HOSTILE_NEEDS_CONFIRM_REASON)
+    : null;
+  const failed = classification.kind === "failed";
+  const step = liveStepFor({
+    status: failed ? "failed" : "decided",
+    action: failed ? null : classification.action ?? null,
+    failure_reason: failed ? classification.reason ?? null : null,
+  } as StoredLiveEvidence);
+  if (step.kind === "failed") return hostile ?? `jev_automatic_failed:${step.reason}`;
+  if (step.kind === "stop") return hostile ?? "nine_asked_stop";
+  if (step.kind === "hold") return liveHoldReason(step.reason);
+  return null;
+}
+
+/** Carry out one stored live v2 decision. Exported for the stage tests via the step above only. */
+async function applyRoutingV2LiveEvidence(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  flags: RoutingV2Flags,
+  evidence: StoredLiveEvidence,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, claim, runCtx } = a;
+  const inboundMessageId = input.inboundMessageId!;
+  const step = liveStepFor(evidence);
+  const holdWithAlerts = async (reason: "nine_asked_stop" | "nine_needs_person") => {
+    // Owner alerts first (exactly once, no reply, no drip), then today's hold.
+    const queued = await queueLiveHoldAlerts(supabase, evidence, {
+      flags, propertyId: input.propertyId, contactId: input.contactId, inboundMessageId,
+    });
+    await trace(supabase, {
+      kind: "hold",
+      name: "routing_v2_hold",
+      result: "held",
+      detail: { engine: "routing_v2", road: evidence.road, alertsQueued: queued },
+    }, runCtx);
+    return nineHoldAndComplete(supabase, a, reason);
+  };
+
+  if (input.routingV2Backfill?.mode === "sort_only") {
+    return applyRoutingV2SortOnly(supabase, a, flags, evidence, holdWithAlerts);
+  }
+  if (input.routingV2Backfill?.mode === "apply" && step.kind === "transition" && evidence.action && ROUTING_V2_BACKFILL_HOLD_ROADS.has(evidence.action.road)) {
+    // An old reply on a road whose approved text only fits a fresh message: its owner alerts
+    // are raised and a person looks; no reply, no drip.
+    return holdWithAlerts("nine_needs_person");
+  }
+  if (step.kind === "failed") {
+    // Same as today's nine engine on a failed classification: hostile wording waits for a
+    // person's confirmation; otherwise the classifier-failure hold.
+    if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
+    return nineHoldAndComplete(supabase, a, `jev_automatic_failed:${step.reason}`);
+  }
+  if (step.kind === "stop") return routeRoutingV2Stop(supabase, a, flags, evidence, holdWithAlerts);
+  if (step.kind === "wrong_number" || step.kind === "bad_number") {
+    return routeRoutingV2PhoneAction(supabase, a, flags, evidence, step.kind);
+  }
+  if (step.kind === "hold") return holdWithAlerts(liveHoldReason(step.reason));
+
+  await testBarrier("dispatch:before_transition", { propertyId: input.propertyId, inboundMessageId });
+  const applied = await applyStoredV2Transition(supabase, {
+    orgId: evidence.org_id,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    inboundMessageId,
+  });
+  await trace(supabase, {
+    kind: "action",
+    name: "routing_v2_transition",
+    result: applied.kind === "applied" ? "applied" : "skipped",
+    detail: {
+      engine: "routing_v2",
+      road: evidence.road,
+      ...(applied.kind === "applied"
+        ? { outcome: applied.transition.outcome ?? null }
+        : { reason: applied.reason, alertsQueued: applied.alertsQueued ?? null }),
+    },
+  }, runCtx);
+  if (applied.kind === "applied") {
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+    // Deliver this property's queued reply now; the cron consumer is the backstop.
+    runAfterResponse(async () => {
+      await runRoutingV2OutboxReplies(supabase, { propertyId: input.propertyId, limit: 5 });
+    });
+    return { outcome: "auto_closed", reason: `routing_v2:${evidence.road}` };
+  }
+  if (applied.reason === "superseded") {
+    // A newer seller text owns the thread; this one's owner alerts were still queued.
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:superseded" });
+    return { outcome: "skipped", reason: "superseded_by_newer_inbound" };
+  }
+  if (applied.reason === "held") {
+    // A-2 F4: the lead is held for the seller's words / a person (the hold landed while this
+    // text was being decided). No reply, no drip start; its owner alerts were queued. Not a new
+    // hold: the lead is already with a person.
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:already_held" });
+    return { outcome: "skipped", reason: "routing_v2:already_held" };
+  }
+  // no_sequence, context_changed, flag_off, takeover / suppression, evidence problems: a person looks.
+  return nineHoldAndComplete(supabase, a, "nine_needs_person");
+}
+
+/**
+ * Backfill sort-only (replies older than --text-max-age-days): sort the lead from the stored
+ * decision without ever texting the seller or starting a drip. Stops, bad numbers, holds and
+ * failures take the live path (none of them sends). Wrong person / sold / tenant and not
+ * interested are closed on THIS property through the existing AI disposition writer; hot and
+ * alert roads raise their stored owner alerts and hold for a person; the rest is recorded only.
+ */
+async function applyRoutingV2SortOnly(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  flags: RoutingV2Flags,
+  evidence: StoredLiveEvidence,
+  holdWithAlerts: (reason: "nine_asked_stop" | "nine_needs_person") => Promise<AiDispatchOutcome>,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, claim, runCtx } = a;
+  const kind = routingV2SortOnlyKind(evidence);
+  const step = liveStepFor(evidence);
+  if (kind === "live_failed") {
+    if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
+    return nineHoldAndComplete(supabase, a, `jev_automatic_failed:${step.kind === "failed" ? step.reason : "unknown"}`);
+  }
+  if (kind === "live_stop") return routeRoutingV2Stop(supabase, a, flags, evidence, holdWithAlerts);
+  if (kind === "live_bad_number") return routeRoutingV2PhoneAction(supabase, a, flags, evidence, "bad_number");
+  if (kind === "live_hold") return holdWithAlerts(step.kind === "hold" ? liveHoldReason(step.reason) : "nine_needs_person");
+  if (kind === "alert_and_hold") return holdWithAlerts("nine_needs_person");
+  if (kind === "close_wrong_number" || kind === "close_not_interested") {
+    const dispo = kind === "close_wrong_number" ? "wrong_number" : "not_interested";
+    // The disposition review's ai_reason (like the nine engine's `nine_questions:<answer>`), not a hold reason.
+    const aiReason = `routing_v2_backfill_sort_only:${evidence.road ?? dispo}`;
+    const result = await setResponderDispo(supabase, {
+      runContext: runCtx,
+      propertyId: input.propertyId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+      dispo,
+      reason: aiReason,
+      expectedRevision: evidence.expected_revision,
+      ...(dispo === "wrong_number" ? { wrongScope: "this_property" as const } : {}),
+    });
+    await trace(supabase, {
+      kind: "action", name: "routing_v2_backfill_sort_only", result: result.updated ? "applied" : "skipped",
+      detail: { engine: "routing_v2", road: evidence.road, dispo, ...(result.updated ? {} : { reason: result.reason }) },
+    }, runCtx);
+    if (!result.updated && result.reason !== "already_terminal") return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+    return { outcome: "auto_closed", reason: `routing_v2:backfill_sort_only:${dispo}` };
+  }
+  await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED });
+  return { outcome: "skipped", reason: ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED };
+}
+
+/** The owner alert (not a hold reason) a sort-only price text raises: the existing "Named a price". */
+const SORT_ONLY_PRICE_ALERT = "named_price" as const;
+
+/**
+ * Sort-only (Astra review 2b-5): a hot road with no alert of its own (price check "too high":
+ * reply only) gets the existing "Named a price" owner alert IN ITS STORED ACTION, before the
+ * decision is recorded, so the recorded evidence and the queued alert agree (the database
+ * validator compares them). Builder's reading of "alert hot roads", pending Jarrad; flagged in
+ * the backfill report. Any other action is returned unchanged.
+ */
+export function withSortOnlyPriceAlert<T extends { road: string; steps: readonly V2Step[] } | null | undefined>(action: T): T {
+  if (!action || action.road !== "price_check" || action.steps.some((s) => s.kind === "alert")) return action;
+  return { ...action, steps: [...action.steps, { kind: "alert", reason: SORT_ONLY_PRICE_ALERT }] } as T;
+}
+
+/** Sort-only on a road with nothing to sort (reply / drip only): decision recorded, nothing else. */
+export const ROUTING_V2_BACKFILL_SORT_ONLY_RECORDED = "routing_v2:backfill_sort_only:recorded";
+
+/** The seller's number for a phone-level action: the inbound's own from address. */
+async function routingV2InboundPhone(supabase: SupabaseClient<Database>, input: AiDispatchInput): Promise<string | null> {
+  if (input.inboundFromPhone) return input.inboundFromPhone;
+  if (!input.inboundMessageId) return null;
+  const { data } = await supabase.from("messages").select("from_address").eq("id", input.inboundMessageId).maybeSingle();
+  return data?.from_address ?? null;
+}
+
+/**
+ * Cutover (c), PR-I: a stop / legal / hostile road. With model_stop_suppression on (and every
+ * property on the phone eligible) a confident Jev stop writes the distinct `model_stop`
+ * suppression and nothing is sent. Every other answer is today's human-review path: hostile
+ * wording waits for a person's confirmation, anything else holds as a stop request.
+ */
+async function routeRoutingV2Stop(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  flags: RoutingV2Flags,
+  evidence: StoredLiveEvidence,
+  holdWithAlerts: (reason: "nine_asked_stop" | "nine_needs_person") => Promise<AiDispatchOutcome>,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, claim, runCtx } = a;
+  const decision = storedV2Decision(evidence);
+  const phone = await routingV2InboundPhone(supabase, input);
+  const outcome = decision && phone
+    ? await executeV2Stop(supabase, {
+        orgId: evidence.org_id,
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        inboundMessageId: input.inboundMessageId!,
+        phone,
+        decision,
+        final: storedFinalDecision(evidence),
+      }, { readFlags: async () => flags })
+    : MODEL_STOP_NO_PHONE;
+  await trace(supabase, {
+    kind: "action",
+    name: "routing_v2_stop",
+    result: outcome.kind === "suppressed" ? "applied" : "skipped",
+    detail: { engine: "routing_v2", outcome: outcome.kind, ...("reason" in outcome ? { reason: outcome.reason } : {}) },
+  }, runCtx);
+  if (outcome.kind === "suppressed") {
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "opted_out" });
+    return { outcome: "opted_out", reason: "routing_v2:model_stop" };
+  }
+  if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
+  return holdWithAlerts(outcome.kind === "not_stop" ? "nine_needs_person" : "nine_asked_stop");
+}
+
+/**
+ * Cutover (c), PR-G: wrong person / sold / tenant, and the "no SMS capabilities" bounce.
+ * Scope comes ONLY from the existing live text match (classifyWrongNumberScope). With
+ * wrong_number_all on and scope "all" (or a bounce), the phone-wide action runs: one atomic
+ * close of every property on the phone, then the approved wrong-number reply keyed by its
+ * durable send id. Anything it does not take (flag off, scope this property, not applicable)
+ * is today's nine-question route: approved reply + close this property only.
+ */
+async function routeRoutingV2PhoneAction(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  flags: RoutingV2Flags,
+  evidence: StoredLiveEvidence,
+  kind: "wrong_number" | "bad_number",
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, property, claim, runCtx, templateCtx } = a;
+  const decision = storedV2Decision(evidence);
+  const phone = await routingV2InboundPhone(supabase, input);
+  const wrongScope = kind === "wrong_number" ? classifyWrongNumberScope(input.inboundBody) : null;
+  if (decision && phone) {
+    const result = await runRoutingV2PhoneAction(supabase, {
+      orgId: evidence.org_id,
+      inboundMessageId: input.inboundMessageId!,
+      fromPhone: phone,
+      decision,
+      wrongScope,
+      final: storedFinalDecision(evidence),
+      expectedRevision: evidence.expected_revision,
+    }, {
+      sendWrongNumberReply: routingV2WrongNumberReplySender(supabase, {
+        orgId: property.org_id, input, turn: (templateCtx?.currentTurn ?? 0) + 1, runCtx,
+      }),
+    });
+    await trace(supabase, {
+      kind: "action",
+      name: "routing_v2_phone_action",
+      result: result.outcome === "applied" || result.outcome === "replayed" ? "applied" : "skipped",
+      detail: { engine: "routing_v2", kind, outcome: result.outcome, ...("reason" in result ? { reason: result.reason } : {}) },
+    }, runCtx);
+    if (result.outcome === "applied" || result.outcome === "replayed") {
+      // Closed phone-wide. A reply that failed / is unknown is recorded on the action for the
+      // settler and the audit; the properties stay closed, as today's wrong-number path does.
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+      return { outcome: "auto_closed", reason: `routing_v2:${evidence.road}` };
+    }
+    if (result.outcome === "superseded") {
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:superseded" });
+      return { outcome: "skipped", reason: "superseded_by_newer_inbound" };
+    }
+    if (result.outcome === "suppressed") {
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: "routing_v2:phone_suppressed" });
+      return { outcome: "skipped", reason: "routing_v2:phone_suppressed" };
+    }
+    if (result.outcome === "not_settled") {
+      // Under 30 s old: re-dispatch the same inbound shortly (bounded like every reply retry);
+      // the stored decision is reused, never a new classification's effects.
+      const attempt = input.retryAttempt ?? 0;
+      if (attempt >= REPLY_RETRY_MAX) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+      const errorMessage = "routing_v2_phone_action:not_settled";
+      let released = await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage, releaseLease: true });
+      if (!released) released = await expireAiResponseClaimLease(supabase, { claimId: claim.claimId, errorMessage });
+      if (!released) return nineHoldAndComplete(supabase, a, "nine_needs_person");
+      return { outcome: "retry", reason: "reply_pending", attempt: attempt + 1, delaySeconds: Math.max(result.retryAfterSeconds, REPLY_RETRY_DELAY_SECONDS) };
+    }
+    if (result.outcome === "apply_failed") return nineHoldAndComplete(supabase, a, "nine_needs_person");
+    // flag_off / not_applicable: today's route below.
+  }
+  if (kind === "bad_number" || !v2SliceAllowed(flags, "replies", input.propertyId)) {
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  const chosen = evidence.provenance && evidence.provenance.by === "jev" ? evidence.provenance.probability : null;
+  const closedHere = await closeNineWrongPersonThisProperty(supabase, a, {
+    evaluationRevision: evidence.expected_revision,
+    classificationRunId: null,
+    chosenProbability: chosen,
+  });
+  // H1(i): today's this-property close leaves drips paused (setResponderDispo). On the v2 path
+  // every reply ends the current drip, so the property's v2 drip (paused by the webhook) is
+  // retired too; otherwise it sits paused on a closed lead nobody owns. Legacy drips: unchanged.
+  if (closedHere.outcome === "auto_closed") {
+    await retireV2DripsForProperty(supabase, input.propertyId, input.inboundMessageId ?? null);
+  }
+  return closedHere;
+}
+
+/** End every active or paused v2 enrollment on the property (ended_reason rerouted). Best effort. */
+export async function retireV2DripsForProperty(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  inboundMessageId: string | null,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const { error } = await (supabase as unknown as {
+    from: (t: string) => { update: (v: Record<string, unknown>) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { in: (k: string, v: string[]) => PromiseLike<{ error: { message: string } | null }> } } } };
+  }).from("sequence_enrollments")
+    .update({ status: "completed", completed_at: now, next_run_at: null, updated_at: now, ended_reason: "rerouted", retired_by_inbound_id: inboundMessageId })
+    .eq("property_id", propertyId).eq("routing_v2_engine", "v2").in("status", ["active", "paused"]);
+  if (error) reportError(new Error(error.message), { tags: { surface: "routing_v2_wrong_number_retire" }, extra: { propertyId } });
+}
+
+/**
+ * The PR-G wrong-number reply transport: the approved wrong-number template only (exact
+ * body), recipient window first, then the normal responder send with the action's durable
+ * send id as the provider idempotency key and PR-G's stillAllowed inside the provider fence.
+ */
+function routingV2WrongNumberReplySender(
+  supabase: SupabaseClient<Database>,
+  ctx: { orgId: string; input: AiDispatchInput; turn: number; runCtx?: MaybeRunContext },
+): SendWrongNumberReply {
+  return async ({ requiredBody, sendId, stillAllowed }) => {
+    const resolved = await resolveApprovedTemplateReply(supabase, {
+      orgId: ctx.orgId, propertyId: ctx.input.propertyId, contactId: ctx.input.contactId,
+      outcome: "wrong_number", outcomeConfidence: null, escalationReason: "not_applicable", decidedBy: "nine_questions",
+    });
+    if (resolved.kind !== "template" || resolved.body !== requiredBody) {
+      return { sent: false, reason: resolved.kind === "none" ? resolved.reason : NINE_REPLY_TEXT_NOT_APPROVED, reachedProvider: false };
+    }
+    const window = await evaluateRecipientWindow(supabase, ctx.input);
+    if (!window.ok) return { sent: false, reason: V2_OUTBOX_REASON.quietHours(window.why), reachedProvider: false };
+    const { data: config } = await supabase.from("ai_responder_configs").select("model, outbound_mode")
+      .eq("org_id", ctx.orgId).eq("active", true).maybeSingle();
+    if (!config) return { sent: false, reason: V2_OUTBOX_REASON.configUnreadable, reachedProvider: false };
+    const sent = await sendResponderMessage(supabase, {
+      runContext: ctx.runCtx,
+      input: ctx.input,
+      body: resolved.body,
+      model: config.model,
+      confidence: 1,
+      sentiment: "neutral",
+      turn: ctx.turn,
+      source: "approved_template",
+      templateId: resolved.templateId,
+      templateSource: resolved.source ?? resolved.body,
+      replyKey: "wrong_number",
+      orgId: ctx.orgId,
+      claimStartedAt: null,
+      outboundMode: config.outbound_mode,
+      replyKind: "send_reply",
+      windowDeferrable: true,
+      providerIdempotencyKey: sendId,
+      routingV2SendAllowed: stillAllowed,
+    });
+    if (sent.outcome === "sent") return { sent: true, outboundMessageId: sent.messageId };
+    return { sent: false, reason: sent.reason, reachedProvider: sent.outcome !== "retry" && sent.reason.startsWith("send_timeout") };
+  };
+}
+
+/**
+ * Cutover (d): PR-G settler. Finishes phone-action replies a crash left pending / sending
+ * (at most once; a `sending` row is only settled by its send id, never re-sent). Each row's
+ * transport is built from the action's own source inbound.
+ */
+export async function settleRoutingV2PhoneRepliesForCron(supabase: SupabaseClient<Database>) {
+  return settleUnsettledRoutingV2PhoneReplies(supabase, async (actionId) => {
+    const { data: action } = await (supabase as unknown as { from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { maybeSingle: () => PromiseLike<{ data: { org_id: string; source_inbound_message_id: string } | null }> } } } })
+      .from("routing_v2_phone_actions").select("org_id, source_inbound_message_id").eq("id", actionId).maybeSingle();
+    if (!action) throw new Error("routing v2 phone action not found");
+    const { data: msg } = await supabase.from("messages")
+      .select("property_id, contact_id, conversation_id, from_address, to_address, body")
+      .eq("id", action.source_inbound_message_id).maybeSingle();
+    if (!msg?.property_id || !msg.contact_id) throw new Error("routing v2 phone action source unreadable");
+    const input: AiDispatchInput = {
+      propertyId: msg.property_id, contactId: msg.contact_id, conversationId: msg.conversation_id ?? null,
+      inboundFromPhone: msg.from_address ?? null, inboundToPhone: msg.to_address ?? null,
+      inboundBody: msg.body ?? "", inboundMessageId: action.source_inbound_message_id,
+    };
+    return { sendWrongNumberReply: routingV2WrongNumberReplySender(supabase, { orgId: action.org_id, input, turn: 1 }) };
+  });
+}
+
+/**
+ * PR-E value lookup for the price check (only called while price_check is on). No API key
+ * configured = no value (the approved fair-price reply + alert path). Ledger hooks are
+ * always passed, so every HTTP attempt is accounted before it is sent.
+ */
+async function routingV2PropertyValue(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+): Promise<ValueLookupResult> {
+  const apiKey = process.env.DEALMACHINE_API_KEY ?? "";
+  if (!apiKey) return DEALMACHINE_NO_KEY;
+  const { data } = await supabase.from("properties").select("address, city, state, zip").eq("id", propertyId).maybeSingle();
+  const row = data as { address?: string | null; city?: string | null; state?: string | null; zip?: string | null } | null;
+  return lookupDealMachineValue(
+    { orgId, propertyId, address: row ? { street: row.address ?? "", city: row.city ?? "", state: row.state ?? "", zip: row.zip ?? null } : null },
+    {
+      store: supabaseDealMachineCacheStore(supabase),
+      callProvider: (address, hooks) => fetchDealMachineEstimatedValue(address, { apiKey, ...hooks }),
+    },
+  );
+}
+
+/** The DB-clock age check could not be read: wait (no claim), never send (a wait, not a hold). */
+const V2_OUTBOX_EXPIRY_UNREADABLE = "expiry_unreadable";
+
+/** A queued v2 reply older than this is never sent late; a person looks instead. */
+export const ROUTING_V2_REPLY_MAX_AGE_MS = 24 * 3600_000;
+
+type RoutingV2OutboxRow = {
+  id: string; org_id: string; property_id: string; inbound_message_id: string;
+  kind: "reply" | "alert"; payload: Record<string, unknown>; created_at: string;
+  /** §5.4 taint inherited from the lead at insert (20261031131100). */
+  test_run_id?: string | null;
+};
+type LooseRpc = { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }> };
+
+/**
+ * Routing v2 cutover (b): deliver ONE queued seller reply, at most once.
+ * claim -> authorize (sets authorized_at once) -> sendResponderMessage, whose provider fence
+ * calls routing_v2_check_authorized_outbox_send and whose provider submission is keyed by the
+ * outbox id -> mark sent with the outbound message id as the receipt. A timeout / unknown
+ * outcome is recorded and NEVER retried (reconcile settles it from the keyed message row).
+ * Quiet hours / the Florida cap wait BEFORE any claim. Replies only: alerts go through the
+ * hold-alert fan-out (routing_v2_alert_delivery_gate).
+ */
+export async function deliverRoutingV2OutboxReply(
+  supabase: SupabaseClient<Database>,
+  row: RoutingV2OutboxRow,
+  now: () => number = Date.now,
+): Promise<V2OutboxResult> {
+  const db = supabase as unknown as LooseRpc;
+  const rpcText = async (fn: string, args: Record<string, unknown>): Promise<string> => {
+    const { data, error } = await db.rpc(fn, args);
+    if (error) throw new Error(`${fn}: ${error.message}`);
+    return typeof data === "string" ? data : "unexpected_result";
+  };
+  // A-2 F2: a reply the seller did not get is a hold about our own reply (mechanics): written
+  // only if no newer seller text exists; the newer text is routed by itself.
+  // Astra review of a0c905d42390 (P1 #2): the result is never discarded. A hold that cannot be
+  // written leaves the row's hold_pending set (the cron retries it; the drip check keeps the drip
+  // waiting meanwhile) and pauses this property's v2 drips now (fail closed).
+  const holdFor = async (why: string): Promise<boolean> => {
+    const r = await writeV2Hold(supabase, row.property_id, row.inbound_message_id, `nine_reply_not_sent:${why}`, "mechanics");
+    if (r === "error") {
+      await pauseV2DripsFailClosed(supabase, row.property_id);
+      return false;
+    }
+    // The hold alone was silent: the owner is told the seller got no reply. An alert that could not
+    // be queued keeps hold_pending set (no hold_written mark), so the cron sweep retries both.
+    if (r !== "superseded") {
+      const alerted = await enqueueV2ReplyFailedAlert(supabase, row.id);
+      if (alerted === "error") return true;
+    }
+    const { error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_mark_outbox_hold_written", { p_outbox_id: row.id });
+    if (error && !/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_outbox_hold_written" }, extra: { outboxId: row.id } });
+    }
+    return true;
+  };
+  const intent: V2OutboxIntent = {
+    id: row.id, orgId: row.org_id, propertyId: row.property_id, inboundMessageId: row.inbound_message_id,
+    kind: row.kind, payload: row.payload,
+  };
+  if (row.kind !== "reply") return { kind: "skipped", reason: V2_OUTBOX_REASON.notAReply };
+  const result = await deliverRoutingV2OutboxIntent(intent, row, supabase, rpcText, holdFor, now);
+  // §13.3: a reply cancelled because its slice was switched off goes back to the human queue.
+  if (result.kind === "skipped" && result.reason === "flag_off") {
+    await holdWithRetry(supabase, row.property_id, "needs_reply");
+  }
+  return result;
+}
+
+async function deliverRoutingV2OutboxIntent(
+  intent: V2OutboxIntent,
+  row: RoutingV2OutboxRow,
+  supabase: SupabaseClient<Database>,
+  rpcText: (fn: string, args: Record<string, unknown>) => Promise<string>,
+  holdFor: (why: string) => Promise<boolean>,
+  now: () => number,
+): Promise<V2OutboxResult> {
+  return deliverV2Outbox(intent, {
+    async prepare() {
+      // Astra review of a0c905d42390 (P2 #3): the age is decided on the DB clock (the final fence
+      // enforces it too). Only a database without the function falls back to the app clock.
+      const { data: expiredData, error: expiredError } = await (supabase as unknown as LooseRpc).rpc("routing_v2_outbox_expired", { p_outbox_id: row.id });
+      const expired = expiredError
+        ? (/PGRST202|42883|does not exist|Could not find/i.test(expiredError.message) ? now() - Date.parse(row.created_at) > ROUTING_V2_REPLY_MAX_AGE_MS : null)
+        : expiredData === true;
+      if (expired === null) {
+        // Review N-2: a persistent error would stall replies quietly; report it (the drip stays
+        // blocked by reply_pending meanwhile, so this fails safe).
+        reportError(new Error(expiredError?.message ?? "routing_v2_outbox_expired unreadable"), {
+          tags: { surface: "routing_v2_outbox_expiry" }, extra: { outboxId: row.id },
+        });
+        return { kind: "wait", reason: V2_OUTBOX_EXPIRY_UNREADABLE };
+      }
+      if (expired) return { kind: "refused", reason: V2_OUTBOX_REASON.expired };
+      const key = row.payload.key;
+      if (typeof key !== "string") return { kind: "refused", reason: V2_OUTBOX_REASON.malformedIntent };
+      const { data: msg } = await supabase
+        .from("messages")
+        .select("contact_id, conversation_id, from_address, to_address, body")
+        .eq("id", row.inbound_message_id)
+        .maybeSingle();
+      if (!msg?.contact_id) return { kind: "refused", reason: V2_OUTBOX_REASON.inboundUnreadable };
+      const input: AiDispatchInput = {
+        propertyId: row.property_id,
+        contactId: msg.contact_id,
+        conversationId: msg.conversation_id ?? null,
+        inboundFromPhone: msg.from_address ?? null,
+        inboundToPhone: msg.to_address ?? null,
+        inboundBody: msg.body ?? "",
+        inboundMessageId: row.inbound_message_id,
+      };
+      // H1(iii): never an auto reply to a lead held for a person (a burst text may have held it
+      // after this reply was queued). Refused = cancelled; the hold already exists.
+      const { data: heldRow } = await supabase.from("properties").select("needs_human_attention").eq("id", row.property_id).maybeSingle();
+      if (heldRow?.needs_human_attention === true) return { kind: "refused", reason: V2_OUTBOX_REASON.heldForPerson };
+      const reply = await resolveV2Reply(supabase, { orgId: row.org_id, propertyId: row.property_id, contactId: msg.contact_id, key: key as V2AnyReplyKey });
+      if (reply.kind !== "ready") return { kind: "refused", reason: reply.reason };
+      const repeat = await templateAlreadySentToProperty(supabase, row.org_id, row.property_id, reply.templateId, reply.body);
+      if (repeat !== "no") return { kind: "refused", reason: repeat === "error" ? `${TEMPLATE_ALREADY_SENT}:lookup_failed` : TEMPLATE_ALREADY_SENT };
+      const window = await evaluateRecipientWindow(supabase, input);
+      if (!window.ok) return { kind: "wait", reason: V2_OUTBOX_REASON.quietHours(window.why) };
+      // A-2 C2: the property's own business-hours window too (the same check the send makes),
+      // so a closed window waits before any claim instead of being refused and held. An unknown
+      // state is not a window to wait for: it goes on to the send, which refuses it; that
+      // refusal comes back as NINE_WINDOW_UNKNOWN_STATE (not a C1 no-op), so the lead is held.
+      const { data: propState } = await supabase.from("properties").select("state").eq("id", row.property_id).maybeSingle();
+      const propertyWindow = checkQuietHours((propState as { state?: string | null } | null)?.state ?? null);
+      if (!propertyWindow.ok && propertyWindow.reason !== "unknown_state") {
+        return { kind: "wait", reason: V2_OUTBOX_REASON.propertyWindow(propertyWindow.reason) };
+      }
+      const { data: config } = await supabase
+        .from("ai_responder_configs")
+        .select("model, outbound_mode")
+        .eq("org_id", row.org_id)
+        .eq("active", true)
+        .maybeSingle();
+      if (!config) return { kind: "refused", reason: V2_OUTBOX_REASON.configUnreadable };
+      const turns = await countAiTurnsInThread(supabase, row.property_id, msg.contact_id, msg.conversation_id ?? null);
+      return {
+        kind: "ready",
+        async send() {
+          const sent = await sendResponderMessage(supabase, {
+            routingV2OutboxId: row.id,
+            ...(row.test_run_id ? { testRunId: row.test_run_id } : {}),
+            input,
+            body: reply.body,
+            model: config.model,
+            confidence: 1,
+            sentiment: "neutral",
+            turn: (turns ?? 0) + 1,
+            orgId: row.org_id,
+            claimStartedAt: null,
+            outboundMode: config.outbound_mode,
+            windowDeferrable: true,
+            ...(reply.fixed
+              // The fixed approved texts (identity, the three hot replies): same guards as today.
+              ? { source: "llm" as const, approvedFixedText: true, replyKind: key === "identity" ? "identity" as const : "nine_hot_reply" as const }
+              : { source: "approved_template" as const, templateId: reply.templateId, templateSource: reply.source, replyKey: key, replyKind: "send_reply" as const }),
+          });
+          if (sent.outcome === "sent") return { kind: "accepted", receiptId: sent.messageId };
+          if (sent.outcome !== "retry" && sent.reason.startsWith("send_timeout")) return { kind: "unknown", reason: sent.reason };
+          return { kind: "not_sent", reason: sent.reason };
+        },
+      };
+    },
+    claim: (id) => rpcText("routing_v2_claim_outbox", { p_outbox_id: id }),
+    authorize: (id) => rpcText("routing_v2_authorize_outbox_send", { p_outbox_id: id }),
+    async accepted(i, receiptId) {
+      const r = await rpcText("routing_v2_mark_outbox_sent", { p_outbox_id: i.id, p_receipt: receiptId });
+      if (r !== "ok") throw new Error(`routing_v2_mark_outbox_sent: ${r}`);
+    },
+    async reconcile(i, reason) {
+      await rpcText("routing_v2_mark_outbox_unknown", { p_outbox_id: i.id, p_reason: reason });
+    },
+    async notSent(i, reason) {
+      const marked = await rpcText("routing_v2_mark_outbox_not_sent", { p_outbox_id: i.id, p_reason: reason });
+      // The seller did not get the reply: a person looks (today's nine-question hold family).
+      // Only when THIS call cancelled the row: a row another consumer already sent, or the
+      // provider fence already cancelled (superseded / takeover), never gets a false hold.
+      // Stress A-2 (round 2): a reply overtaken by a newer seller text whose own dispatch is still
+      // pending / scheduled (or already handled it) is not a failure; that dispatch routes it, and
+      // a hold here would make it exit already_terminal. A newer text whose handler ended without
+      // handling it, or never started (webhook died after the insert), still holds (review M-1).
+      // Astra review of a0c905d42390 (P1 #2): the cancel itself decided the handoff, atomically:
+      // "ok_no_hold" = overtaken by a newer text (A-2 F1) or a mechanics no-op while this inbound's
+      // drip runs (A-2 C1); "ok" = cancelled with hold_pending (the drip waits until the hold lands).
+      // Jarrad 2026-11-08: a repeat-text suppression with no hold leaves the seller in silence:
+      // tell the owner (the duplicate text itself is still never sent).
+      const repeatNoHold = async () => {
+        if (reason === TEMPLATE_ALREADY_SENT) await enqueueV2ReplyRepeatAlert(supabase, row.id);
+      };
+      if (marked === "ok_no_hold") return repeatNoHold();
+      if (marked !== "ok") return;
+      // A database still on the 330000 body returns plain "ok" for every cancel: keep its checks.
+      if (isV2SupersededReason(reason)) return;
+      await testBarrier("outbox:before_hold", { propertyId: row.property_id, inboundMessageId: row.inbound_message_id });
+      if (isV2MechanicsNoOpReason(reason) && (await v2DripActiveForInbound(supabase, row))) return repeatNoHold();
+      await holdFor(reason.replace(/\s+/g, "_"));
+    },
+  });
+}
+
+/** The database clock (routing_v2_db_now); this server's clock only if it cannot be read. */
+async function dbNowMs(supabase: SupabaseClient<Database>): Promise<number> {
+  try {
+    const { data, error } = await (supabase as unknown as LooseRpc).rpc("routing_v2_db_now", {});
+    const ms = !error && typeof data === "string" ? Date.parse(data) : Number.NaN;
+    return Number.isNaN(ms) ? Date.now() : ms;
+  } catch {
+    return Date.now();
+  }
+}
+
+/** Fail closed: every active v2 drip of the property is paused for a person (best effort, reported). */
+async function pauseV2DripsFailClosed(supabase: SupabaseClient<Database>, propertyId: string): Promise<void> {
+  const { error } = await (supabase as unknown as {
+    from: (t: string) => { update: (v: Record<string, unknown>) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => { eq: (c: string, v: unknown) => PromiseLike<{ error: { message: string } | null }> } } } };
+  }).from("sequence_enrollments")
+    .update({ status: "paused", pause_reason: "held_for_person", updated_at: new Date().toISOString() })
+    .eq("property_id", propertyId).eq("routing_v2_engine", "v2").eq("status", "active");
+  if (error) reportError(new Error(error.message), { tags: { surface: "routing_v2_fail_closed_pause" }, extra: { propertyId } });
+}
+
+/** A queued v2 reply cancelled because something newer overtook it (the send gate's reasons). */
+export function isV2SupersededReason(reason: string): boolean {
+  return /^(superseded_before_send|superseded_by_newer_inbound)$/.test(reason);
+}
+
+/** A-2 C3: rule 3 fired ONLY because of our own older auto reply (no person's text involved). */
+export function isOwnOlderAutoReplyOnly(decision: SendGateDecision): boolean {
+  if (decision.action !== "skip" || decision.rule !== 3) return false;
+  const triggers = decision.triggers ?? [];
+  return triggers.length > 0 && triggers.every((t) => t === "ai_other_inbound");
+}
+
+/** Outbox send outcomes that are mechanics, not a person case, when the road's drip is running. */
+export function isV2MechanicsNoOpReason(reason: string): boolean {
+  return reason === TEMPLATE_ALREADY_SENT
+    || reason === NINE_WINDOW_CLOSED
+    || reason === NINE_WINDOW_CLOSED_AT_FENCE
+    || reason === V2_OLDER_AUTO_REPLY_SENT;
+}
+
+/** Is the v2 drip this reply's inbound enrolled still active? A lookup error = no (hold). */
+async function v2DripActiveForInbound(supabase: SupabaseClient<Database>, row: RoutingV2OutboxRow): Promise<boolean> {
+  const { data, error } = await (supabase as unknown as {
+    from: (t: string) => { select: (c: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { eq: (k: string, v: string) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }> } } } } };
+  }).from("sequence_enrollments").select("id")
+    .eq("property_id", row.property_id).eq("routing_v2_inbound_id", row.inbound_message_id).eq("status", "active")
+    .limit(1);
+  return !error && (data ?? []).length > 0;
+}
+
+/**
+ * A safety hold through routing_v2_write_hold (reviews B-1 / B-1'): holds an unheld lead, upgrades
+ * a mechanics hold to safety (never the reverse), leaves any other hold as it is. "unavailable" =
+ * the function is not deployed; "error" = any other failure (reported; callers retry / fail).
+ */
+export async function writeSafetyHold(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  inboundMessageId: string | null,
+  reason: string,
+): Promise<"held" | "upgraded" | "already_held" | "missing" | "unavailable" | "error"> {
+  const db = supabase as unknown as LooseRpc;
+  let data: unknown;
+  let error: { message: string } | null;
+  try {
+    ({ data, error } = await db.rpc("routing_v2_write_hold", {
+      p_property_id: propertyId, p_inbound_message_id: inboundMessageId, p_reason: reason, p_kind: "safety",
+    }));
+  } catch {
+    // supabase-js returns errors rather than throwing; a client without rpc (older test
+    // doubles) is treated like a missing function: the caller proves the flag by reading it.
+    return "unavailable";
+  }
+  if (error) {
+    if (/PGRST202|42883|does not exist|Could not find/i.test(error.message)) return "unavailable";
+    reportError(new Error(error.message), { tags: { surface: "ai_responder_safety_hold" }, extra: { propertyId, reason } });
+    return "error";
+  }
+  if (data === "held" || data === "upgraded" || data === "already_held") return data;
+  reportError(new Error(`safety hold not written: ${String(data)}`), { tags: { surface: "ai_responder_safety_hold" }, extra: { propertyId, reason } });
+  return "missing";
+}
+
+/**
+ * The one writer of v2 holds (routing_v2_write_hold, 20261031131600), with bounded retries.
+ * 'mechanics' = our own reply could not go out: written only if no newer seller text exists
+ * ('superseded'); 'safety' = the seller's words / a person: always written. Returns 'error' when
+ * the hold could not be written.
+ */
+export async function writeV2Hold(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  inboundMessageId: string,
+  reason: string,
+  kind: "mechanics" | "safety",
+): Promise<"held" | "already_held" | "upgraded" | "superseded" | "missing" | "error"> {
+  const db = supabase as unknown as LooseRpc;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { data, error } = await db.rpc("routing_v2_write_hold", {
+      p_property_id: propertyId, p_inbound_message_id: inboundMessageId, p_reason: reason, p_kind: kind,
+    });
+    if (!error && typeof data === "string") return data as "held" | "already_held" | "upgraded" | "superseded" | "missing";
+    if (attempt === 2) {
+      reportError(new Error(error?.message ?? "routing_v2_write_hold: unexpected result"), {
+        tags: { surface: "routing_v2_write_hold" }, extra: { propertyId, inboundMessageId, reason, kind },
+      });
+    }
+  }
+  return "error";
+}
+
+/** Routing v2 cutover (b)/(d): the outbox consumer (cron + an immediate kick after a transition). */
+/** A hold that has failed this many times is reported on every further failure. */
+export const ROUTING_V2_HOLD_REPORT_AFTER = 5;
+
+/** Owner alert reason for a queued reply that could not go out (an alert reason, not a hold reason). */
+const V2_REPLY_FAILED_ALERT = "reply_failed" as const;
+
+/** Owner alert reason for a reply suppressed as a repeat of a text already sent on the property. */
+const V2_REPLY_REPEAT_ALERT = "reply_repeat" as const;
+
+/** Delivery identity of the reply-failed owner alert: one per inbound, never hotTextKey. */
+export function v2ReplyFailedAlertKey(inboundMessageId: string): string {
+  return `routing_v2:${inboundMessageId}:reply_failed`;
+}
+
+/** Delivery identity of the reply-repeat owner alert: one per inbound, never hotTextKey. */
+export function v2ReplyRepeatAlertKey(inboundMessageId: string): string {
+  return `routing_v2:${inboundMessageId}:reply_repeat`;
+}
+
+/**
+ * Jarrad 2026-11-08: a v2 reply suppressed because the same text was already sent on this
+ * property (`template_already_sent`) while this inbound's drip runs is cancelled with no hold
+ * (ok_no_hold), so the seller got no reply and no person was told. This queues one
+ * `reply_repeat` owner alert per inbound (same row shape and gating as reply_failed). The
+ * suppression itself stays. Not retry-backed (there is no hold_pending on this path): a failed
+ * enqueue is reported. Never throws.
+ */
+export async function enqueueV2ReplyRepeatAlert(supabase: SupabaseClient<Database>, replyOutboxId: string): Promise<"queued" | "exists" | "skipped" | "error"> {
+  return enqueueV2ReplyOwnerAlert(supabase, replyOutboxId, V2_REPLY_REPEAT_ALERT, v2ReplyRepeatAlertKey);
+}
+
+/**
+ * A queued v2 reply the seller did not get (cancelled not_sent / expired / unknown too long) used
+ * to end in a hold flag only: no owner alert, because the road's own alert was either absent
+ * (price too high) or skipped by alert_on_time_only (book appointment). This queues one
+ * `reply_failed` owner alert (kind 'alert', same transition_seq as the failed reply). A newer seller
+ * text does NOT cancel it (claim/check supersede replies only): the owner still learns the seller got
+ * no reply. when_time_only_off is false: never time-only gated.
+ * Not atomic: a look-first-then-insert (no unique index on routing_v2_outbox), so two concurrent
+ * callers (dispatch-time holdFor and the holds_due sweep) can each insert a row. That is safe for
+ * delivery: the fan-out collapses rows by dedupe_key and hold_alert_deliveries keys per channel on
+ * it, so the owner gets at most one alert per inbound. Never throws; "error" = caller keeps its
+ * retry obligation (hold_pending) so the alert is retried.
+ */
+export async function enqueueV2ReplyFailedAlert(supabase: SupabaseClient<Database>, replyOutboxId: string): Promise<"queued" | "exists" | "skipped" | "error"> {
+  return enqueueV2ReplyOwnerAlert(supabase, replyOutboxId, V2_REPLY_FAILED_ALERT, v2ReplyFailedAlertKey);
+}
+
+async function enqueueV2ReplyOwnerAlert(
+  supabase: SupabaseClient<Database>,
+  replyOutboxId: string,
+  reason: typeof V2_REPLY_FAILED_ALERT | typeof V2_REPLY_REPEAT_ALERT,
+  keyFor: (inboundMessageId: string) => string,
+): Promise<"queued" | "exists" | "skipped" | "error"> {
+  const surface = `routing_v2_${reason}_alert`;
+  const loose = supabase as unknown as {
+    from: (t: string) => {
+      select: (c: string) => {
+        eq: (k: string, v: unknown) => {
+          maybeSingle: () => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+          eq: (k: string, v: unknown) => {
+            eq: (k: string, v: unknown) => { limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: { message: string } | null }> };
+            limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: { message: string } | null }>;
+          };
+        };
+      };
+      insert: (v: Record<string, unknown>) => PromiseLike<{ error: { message: string } | null }>;
+    };
+  };
+  try {
+    const { data, error } = await loose.from("routing_v2_outbox")
+      .select("org_id, property_id, inbound_message_id, transition_seq, kind, payload").eq("id", replyOutboxId).maybeSingle();
+    const src = data as { org_id: string; property_id: string; inbound_message_id: string; transition_seq: number; kind: string; payload?: { key?: unknown } | null } | null;
+    if (error || !src) {
+      if (error) reportError(new Error(error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
+      return error ? "error" : "skipped";
+    }
+    if (src.kind !== "reply") return "skipped";
+    // Alert-noise F1 (2026-11-10): a repeated "no" (not_interested reply suppressed) does not alert.
+    if (reason === V2_REPLY_REPEAT_ALERT && src.payload?.key === "not_interested") return "skipped";
+    const key = keyFor(src.inbound_message_id);
+    const existing = await loose.from("routing_v2_outbox").select("id")
+      .eq("inbound_message_id", src.inbound_message_id).eq("kind", "alert").eq("payload->>dedupe_key", key).limit(1);
+    if (existing.error) {
+      reportError(new Error(existing.error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
+      return "error";
+    }
+    if ((existing.data ?? []).length > 0) return "exists";
+    // Alert-noise F3b (2026-11-10): one alert per inbound. Another alert row for the same inbound
+    // (different reason) that WILL reach the owner covers it: sent; or pending/claimed and not
+    // time-only conditional; or pending/claimed, conditional, and time-only not in force right now
+    // (fresh, strict flag read). Cancelled rows never cover. Any lookup failure = "error", never "skipped".
+    const others = await loose.from("routing_v2_outbox").select("id, status, payload")
+      .eq("inbound_message_id", src.inbound_message_id).eq("kind", "alert").limit(100);
+    if (others.error) {
+      reportError(new Error(others.error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
+      return "error";
+    }
+    let timeOnlyInForce: boolean | null = null;
+    for (const o of (others.data ?? []) as Array<{ status?: string; payload?: { reason?: unknown; when_time_only_off?: unknown } | null }>) {
+      if (o.payload?.reason === reason) continue; // same reason (incl. a racing duplicate) is not "another" alert
+      if (o.status === "sent") return "skipped";
+      if (o.status !== "pending" && o.status !== "claimed") continue;
+      if (o.payload?.when_time_only_off !== true) return "skipped";
+      if (timeOnlyInForce === null) {
+        const flags = await readRoutingV2FlagsResult(supabase, src.org_id);
+        if (!flags.ok) {
+          reportError(new Error("routing v2 flags unreadable"), { tags: { surface }, extra: { outboxId: replyOutboxId } });
+          return "error";
+        }
+        timeOnlyInForce = alertOnTimeOnlyInForce(flags.flags, src.property_id);
+      }
+      if (!timeOnlyInForce) return "skipped";
+    }
+    const ins = await loose.from("routing_v2_outbox").insert({
+      org_id: src.org_id, property_id: src.property_id, inbound_message_id: src.inbound_message_id,
+      transition_seq: src.transition_seq, kind: "alert", engine: "v2", slice: "replies",
+      payload: { reason, label: V2_ALERT_LABELS[reason], dedupe_key: key, when_time_only_off: false },
+    });
+    if (ins.error) {
+      reportError(new Error(ins.error.message), { tags: { surface }, extra: { outboxId: replyOutboxId } });
+      return "error";
+    }
+    return "queued";
+  } catch (e) {
+    reportError(e, { tags: { surface }, extra: { outboxId: replyOutboxId } });
+    return "error";
+  }
+}
+
+/** A queued reply the seller did not get: today's hold reason family, no whitespace. */
+export function routingV2OutboxHoldReason(cancelReason: string): string {
+  if (cancelReason.startsWith("unknown:")) return "nine_reply_not_sent:send_outcome_unknown";
+  const tail = cancelReason.replace(/^not_sent:/, "").replace(/\s+/g, "_");
+  return `nine_reply_not_sent:${tail || "not_sent"}`;
+}
+
+/**
+ * A-2 lease death (review of 30d35369b, N-1): a newer text that is saved but never stamped is
+ * treated as "still inside its webhook" for WEBHOOK_PROCESSING_LEASE_MS, so an older reply is
+ * cancelled without a hold. If that webhook then dies, nothing else picks the text up (a
+ * redelivery inside the lease is acknowledged as a skip). This sweep, run by the outbox cron,
+ * holds a person for a v2-live lead whose inbound SMS is older than the lease and still has no
+ * responder stamp, no claim, no keyword exit and no v2 decision / audit row.
+ * - Every text it examines is marked (processing.routingV2Sweep), so the next pass never picks it
+ *   again: handled or not-v2 texts cannot pile up in front of a new dead one (review N-1). The
+ *   mark is written only while the text still has no responder stamp, so it never overwrites a
+ *   stamp being written at the same moment.
+ * - "v2-live" is read from the flags at SWEEP time, not at the text's arrival (review N-2): a
+ *   text that arrived just before the slice was switched on is also swept. Fail-safe: the worst
+ *   case is a person looks at it.
+ * - It stops when `shouldStop` says the cron is out of time (the rest wait for the next pass).
+ */
+export async function sweepUnstampedV2Inbounds(
+  supabase: SupabaseClient<Database>,
+  _nowMs: number = Date.now(),
+  shouldStop: () => boolean = () => false,
+  propertyId?: string,
+): Promise<number> {
+  // A-2 F3: candidates come from SQL, aged on the DB clock (never the app clock): an inbound SMS
+  // with no stamp past the webhook lease, a 'delayed' stamp whose workflow never ran (scheduled
+  // time past by the lease), or a claim still 'processing' long after its lease expired; none
+  // with a v2 decision / audit row, a keyword exit, or a previous sweep mark.
+  const db = supabase as unknown as LooseRpc;
+  // Round 18: unresolved safety obligations are recovered first, regardless of flags (a flag
+  // change or a not_v2 mark never discharges one): the hold is written; the obligation resolves in
+  // the same transaction when it lands. Ones still open after a day are reported once per pass.
+  let held = 0;
+  // Opus B4 on #956: fallback markers (the obligation itself could not be written) become real
+  // obligations first, so the candidate list below recovers them like any other.
+  await promoteUnrecordedObligationMarkers(supabase, { limit: 50, propertyId: propertyId ?? null });
+  const ob = await db.rpc("routing_v2_obligation_candidates", { p_limit: 50, ...(propertyId ? { p_property_id: propertyId } : {}) });
+  if (ob.error) {
+    if (!/PGRST202|42883|does not exist|Could not find/i.test(ob.error.message)) {
+      reportError(new Error(ob.error.message), { tags: { surface: "routing_v2_obligation_sweep" } });
+    }
+  } else {
+    const dbNow = await dbNowMs(supabase);
+    let stale = 0;
+    for (const o of (ob.data ?? []) as Array<{ property_id: string; inbound_message_id: string | null; reason: string; created_at: string }>) {
+      if (shouldStop()) break;
+      if (Date.parse(o.created_at) < dbNow - 24 * 3600_000) stale++;
+      const r = await writeV2Hold(supabase, o.property_id, o.inbound_message_id as string, o.reason, "safety");
+      if (r === "error") { await pauseV2DripsFailClosed(supabase, o.property_id); continue; }
+      if (r === "held" || r === "upgraded") held++;
+    }
+    if (stale > 0) {
+      reportError(new Error(`routing v2: ${stale} safety obligation(s) still unresolved after 24 h`), {
+        tags: { surface: "routing_v2_obligation_sweep" }, extra: { count: stale },
+      });
+    }
+  }
+  const { data, error } = await db.rpc("routing_v2_sweep_candidates", {
+    p_lease_seconds: Math.round(WEBHOOK_PROCESSING_LEASE_MS / 1000), p_limit: 50,
+    ...(propertyId ? { p_property_id: propertyId } : {}),
+  });
+  if (error) {
+    if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_unstamped_sweep" } });
+    }
+    return held;
+  }
+  for (const m of (data ?? []) as Array<{ id: string; org_id: string; property_id: string; conversation_id: string | null; why: string; created_at?: string }>) {
+    if (shouldStop()) break;
+    // Review B2: an unreadable v2 state is NOT "not v2". The text is left unmarked for the next
+    // pass (a flaky database must never let a dead v2 text escape).
+    const live = await routingV2LiveForSweep(supabase, m.org_id, m.property_id);
+    if (live === "error") {
+      reportError(new Error("routing v2 sweep: v2-live state unreadable; left for the next pass"), {
+        tags: { surface: "routing_v2_unstamped_sweep" }, extra: { messageId: m.id, propertyId: m.property_id },
+      });
+      continue;
+    }
+    let result: "not_v2" | "held";
+    if (live === "no") result = "not_v2";
+    else {
+      // A dead newest text is a person case about the seller's text (safety): always written.
+      // Not marked "held" unless the hold is really there.
+      const hold = await writeV2Hold(supabase, m.property_id, m.id, "nine_needs_person", "safety");
+      if (hold === "error") {
+        // Review N-1: the hold could not be written: fail closed now (the v2 drips paused); the
+        // text stays unmarked, so the next pass re-attempts the hold.
+        await pauseV2DripsFailClosed(supabase, m.property_id);
+        continue;
+      }
+      if (hold === "missing") continue;
+      await recordRoutingV2Audit(supabase, {
+        orgId: m.org_id, propertyId: m.property_id, inboundMessageId: m.id, conversationId: m.conversation_id,
+        note: `webhook_lease_expired_${m.why}`,
+      }, (e) => reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } }));
+      held++;
+      result = "held";
+    }
+    // Server-side mark (jsonb_set): only on a text with no completed responder stamp.
+    const { error: markError } = await db.rpc("routing_v2_mark_inbound_swept", { p_message_id: m.id, p_result: result });
+    if (markError) reportError(new Error(markError.message), { tags: { surface: "routing_v2_unstamped_sweep_mark" }, extra: { messageId: m.id } });
+  }
+  return held;
+}
+
+/**
+ * Is this lead on the routing v2 live path? (The early gate's single strict read and the sweep.)
+ * Every read is error-checked: an unreadable flag row, config or
+ * engine is "error", so the caller retries instead of deciding (review B2).
+ */
+export async function routingV2LiveForSweep(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string,
+): Promise<"yes" | "no" | "error"> {
+  try {
+    const flags = await readRoutingV2FlagsResult(supabase, orgId);
+    if (!flags.ok) return "error";
+    if (!flags.flags.questions_live || !isV2Eligible(flags.flags, propertyId)) return "no";
+    const { data: config, error } = await supabase.from("ai_responder_configs")
+      .select("classifier_provider, classifier_mode").eq("org_id", orgId).eq("active", true).maybeSingle();
+    if (error) return "error";
+    if (config?.classifier_provider !== "jev" || config.classifier_mode !== "automatic") return "no";
+    const engine = await readClassifierEngine(supabase, orgId);
+    if (engine === "unreadable") return "error";
+    return engine === "nine_questions" ? "yes" : "no";
+  } catch {
+    return "error";
+  }
+}
+
+export async function runRoutingV2OutboxReplies(
+  supabase: SupabaseClient<Database>,
+  opts: { propertyId?: string; limit?: number; budgetMs?: number; now?: () => number } = {},
+): Promise<{ released: number; reconciled: unknown; held: number; results: Array<{ id: string; result: V2OutboxResult | { kind: "error" } }> }> {
+  const db = supabase as unknown as LooseRpc;
+  const now = opts.now ?? Date.now;
+  const started = now();
+  let released = 0;
+  let reconciled: unknown = null;
+  let held = 0;
+  if (!opts.propertyId) {
+    const rel = await db.rpc("routing_v2_release_stale_outbox_claims", { p_older_than_seconds: 300 });
+    if (rel.error) reportError(new Error(rel.error.message), { tags: { surface: "routing_v2_outbox_release" } });
+    else released = typeof rel.data === "number" ? rel.data : 0;
+    const rec = await db.rpc("routing_v2_reconcile_outbox", { p_older_than_seconds: 180, p_unknown_hold_minutes: 30 });
+    if (rec.error) reportError(new Error(rec.error.message), { tags: { surface: "routing_v2_outbox_reconcile" } });
+    else reconciled = rec.data;
+    // Replies the seller did not get (never submitted, provider failed, outcome unknown too
+    // long): write today's hold, then clear the marker. A crash between the two re-holds.
+    // A newer text whose webhook died inside its lease (A-2): a person looks.
+    // Respects the cron's time budget (review item 4): no new text is examined past it.
+    const outOfTime = () => opts.budgetMs !== undefined && now() - started > opts.budgetMs;
+    held += await sweepUnstampedV2Inbounds(supabase, now(), outOfTime).catch((e) => {
+      reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" } });
+      return 0;
+    });
+    const due = await db.rpc("routing_v2_outbox_holds_due", { p_limit: 50 });
+    if (due.error) reportError(new Error(due.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
+    for (const row of ((due.data ?? []) as Array<{ outbox_id: string; property_id: string; reason: string; attempts?: number }>)) {
+      // A-2 F2: mechanics hold about this outbox row's own reply (superseded by a newer text = done).
+      const { data: boxRow, error: boxError } = await supabase.from("routing_v2_outbox" as never).select("inbound_message_id").eq("id", row.outbox_id).maybeSingle();
+      if (boxError) {
+        // Unreadable now: keep hold_pending (no hold_written mark) so the next sweep retries the
+        // hold and the reply_failed alert; never fall through to a hold without its alert.
+        if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
+          reportError(new Error((boxError as { message?: string }).message ?? "routing_v2_outbox unreadable"), {
+            tags: { surface: "routing_v2_outbox_holds" }, extra: { outboxId: row.outbox_id, propertyId: row.property_id, attempts: row.attempts },
+          });
+        }
+        continue;
+      }
+      const inboundId = (boxRow as { inbound_message_id?: string } | null)?.inbound_message_id;
+      const written = inboundId
+        ? await writeV2Hold(supabase, row.property_id, inboundId, routingV2OutboxHoldReason(row.reason), "mechanics")
+        : null;
+      const ok = inboundId
+        ? written !== "error"
+        : await holdWithRetry(supabase, row.property_id, routingV2OutboxHoldReason(row.reason));
+      // The hold alone was silent: the owner is told the seller got no reply. An alert that could not
+      // be queued leaves the row pending (no hold_written mark): the next sweep retries it.
+      if (inboundId && written !== "error" && written !== "superseded") {
+        const alerted = await enqueueV2ReplyFailedAlert(supabase, row.outbox_id);
+        if (alerted === "error") {
+          if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
+            reportError(new Error("routing v2 reply_failed alert keeps failing"), {
+              tags: { surface: "routing_v2_outbox_holds" },
+              extra: { outboxId: row.outbox_id, propertyId: row.property_id, attempts: row.attempts },
+            });
+          }
+          continue;
+        }
+      }
+      if (!ok) {
+        // Stays pending and rotates to the back of the queue (holds_due stamps each attempt).
+        // Astra review of a0c905d42390 (P1 #2): a hold that cannot be written never lets the drip go.
+        await pauseV2DripsFailClosed(supabase, row.property_id);
+        if ((row.attempts ?? 0) >= ROUTING_V2_HOLD_REPORT_AFTER) {
+          reportError(new Error("routing v2 outbox hold keeps failing"), {
+            tags: { surface: "routing_v2_outbox_holds" },
+            extra: { outboxId: row.outbox_id, propertyId: row.property_id, attempts: row.attempts },
+          });
+        }
+        continue;
+      }
+      const mark = await db.rpc("routing_v2_mark_outbox_hold_written", { p_outbox_id: row.outbox_id });
+      if (mark.error) reportError(new Error(mark.error.message), { tags: { surface: "routing_v2_outbox_holds" } });
+      else held++;
+    }
+  }
+  if (opts.propertyId) {
+    // Astra review of b6a00a0a2f17 (D): recovery never waits for the cron. The per-property
+    // delivery (right after a dispatch) first runs this property's sweep step, so an unrecovered
+    // safety obligation of an older text is held before anything for the newer one goes out.
+    held += await sweepUnstampedV2Inbounds(supabase, Date.now(), () => false, opts.propertyId).catch((e) => {
+      reportError(e, { tags: { surface: "routing_v2_unstamped_sweep" }, extra: { propertyId: opts.propertyId } });
+      return 0;
+    });
+  }
+  const { data, error } = await db.rpc("routing_v2_due_outbox_replies", {
+    p_limit: opts.limit ?? 20,
+    p_property_id: opts.propertyId ?? null,
+  });
+  if (error) {
+    // Deployed ahead of the migration, or unreadable: nothing is sent.
+    if (!/PGRST202|42883|does not exist|Could not find/i.test(error.message)) {
+      reportError(new Error(error.message), { tags: { surface: "routing_v2_outbox_due" } });
+    }
+    return { released, reconciled, held, results: [] };
+  }
+  const results: Array<{ id: string; result: V2OutboxResult | { kind: "error" } }> = [];
+  for (const row of (data ?? []) as RoutingV2OutboxRow[]) {
+    // Time budget: never start a new claim once over it (the cron's own limit is 60 s).
+    if (opts.budgetMs !== undefined && now() - started > opts.budgetMs) break;
+    try {
+      results.push({ id: row.id, result: await deliverRoutingV2OutboxReply(supabase, row) });
+    } catch (e) {
+      reportError(e, { tags: { surface: "routing_v2_outbox_deliver" }, extra: { outboxId: row.id } });
+      results.push({ id: row.id, result: { kind: "error" } });
+    }
+  }
+  return { released, reconciled, held, results };
+}
+
+/**
+ * Today's nine-question wrong-person route, unchanged: the approved wrong-number reply, then
+ * close THIS property only (a person decides anything phone-wide). Shared by the nine engine
+ * and the routing v2 live hook (classificationRunId null = no Jev review row to link).
+ */
+async function closeNineWrongPersonThisProperty(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  d: { evaluationRevision: number; classificationRunId: string | null; chosenProbability: number | null },
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, property, claim, runCtx, templateCtx } = a;
+  // Same gates as the eight-answer wrong-number route: the label's automation switch
+  // decides whether Sandra may act at all; otherwise a person closes it.
+  const thresholds = await loadOrgThresholdMap(supabase, property.org_id);
+  if (thresholds.wrong_number?.automationEnabled !== true) {
+    return nineHoldAndComplete(supabase, a, "nine_automation_disabled:wrong_number");
+  }
+  // Close ONLY after the approved reply was accepted by the provider.
+  if (!templateCtx) return nineHoldAndComplete(supabase, a, "nine_reply_not_sent:reply_ineligible");
+  const wrongStep = await runApprovedTemplateStep(supabase, {
+    input,
+    property,
+    ctx: templateCtx,
+    claim,
+    outcome: "wrong_number",
+    nativeConfidence: d.chosenProbability,
+    escalationReason: "not_applicable",
+    decidedBy: "nine_questions",
+    requiredBody: APPROVED_REPLY_TEXTS.wrong_number,
+    runCtx,
+  });
+  if (wrongStep.kind === "stop") return wrongStep.outcome;
+  if (!wrongStep.outboundMessageId || wrongStep.replyKey !== "wrong_number") {
+    const why = wrongStep.notSentReason ?? "not_sent";
+    return nineHoldAndComplete(supabase, a, why === NINE_REPLY_TEXT_NOT_APPROVED ? why : `nine_reply_not_sent:${why}`);
+  }
+  const messageId: string | null = wrongStep.outboundMessageId;
+  await testBarrier("dispatch:before_wrong_person_close", { propertyId: input.propertyId, inboundMessageId: input.inboundMessageId ?? null });
+  // Our own reply is ONE outbound SMS row, which moves decision_context_revision by
+  // exactly one (trg_messages_bump_decision_context_revision). Account for that and
+  // nothing else: any further movement (a person texting, a takeover, an assignment)
+  // means someone else changed the lead, so a person looks and nothing is closed.
+  let closeRevision = d.evaluationRevision;
+  if (messageId) {
+    const { data: current } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (!current) return nineHoldAndComplete(supabase, a, "nine_close_wrong_person_unreadable", messageId);
+    const expectedAfterOwnReply = wrongPersonCloseRevision(d.evaluationRevision, current.decision_context_revision);
+    if (expectedAfterOwnReply === null) {
+      return nineHoldAndComplete(supabase, a, NINE_CLOSE_WRONG_PERSON_CONTEXT_CHANGED, messageId);
+    }
+    closeRevision = expectedAfterOwnReply;
+  }
+  const closed = await applyWrongNumber(supabase, {
+    runContext: runCtx,
+    propertyId: input.propertyId,
+    conversationId: input.conversationId ?? null,
+    inboundMessageId: input.inboundMessageId ?? null,
+    // This property only: phone-wide suppression is a person's call.
+    scope: "this_property",
+    reason: "nine_questions:wrong_person",
+    expectedRevision: closeRevision,
+  });
+  await traceDisposition(supabase, "wrong_number", closed, false, runCtx);
+  // As the eight-answer route does for an applied wrong_number (this property only):
+  // link the review to the run that decided it. A failure leaves it pending for a person.
+  if (closed.updated && input.inboundMessageId && d.classificationRunId) {
+    await maybeAutoAcceptJevReview(supabase, input.inboundMessageId, d.classificationRunId);
+  }
+  const closedOutcome = closeOutcome(closed, "nine_questions:wrong_person");
+  await completeClaim(supabase, input.propertyId, {
+    claimId: claim.claimId,
+    outcome: claimOutcomeOf(closedOutcome),
+    errorMessage: dispositionClaimError(closed),
+    ...(messageId ? { outboundMessageId: messageId } : {}),
+  });
+  return closedOutcome;
+}
+
+export async function runNineQuestionsStep(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
+  const { input, property, claim, runCtx, templateCtx } = a;
+  if (input.nineDeferral?.hotReply) {
+    // Only the approved hot reply text is waiting: the promotion, hand-off and alert already
+    // happened. Send it only if nothing about the lead changed while it waited (a person
+    // texting, calling, a status change...); otherwise drop the text, never re-decide.
+    const deferral = input.nineDeferral;
+    const { data: current, error: revisionError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    const action = actionForNineAnswer(deferral.result.answer);
+    if (revisionError || !current || current.decision_context_revision !== deferral.revision || action.kind !== "hot" || !action.reply) {
+      await trace(supabase, {
+        kind: "reply",
+        name: "nine_hot_reply",
+        result: "skipped",
+        detail: { engine: "nine_questions", why: "context_changed" },
+      }, runCtx);
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: NINE_HOT_REPLY_CONTEXT_CHANGED });
+      return { outcome: "skipped", reason: "nine_hot_reply_context_changed" };
+    }
+    return sendNineHotReply(supabase, a, action.reply, {
+      classificationRunId: deferral.classificationRunId,
+      evaluationRevision: deferral.revision,
+      result: deferral.result,
+    }, deferral.revision);
+  }
+  if (input.nineDeferral) {
+    // A deferred reply: act only if nothing about the lead changed while it waited
+    // (a new text, a takeover, a status / dispo change all move the revision).
+    const { data: current, error: revisionError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (revisionError || !current) {
+      // Unreadable: we cannot tell who owns the thread, so a person looks.
+      return nineHoldAndComplete(supabase, a, NINE_DEFERRED_CONTEXT_CHANGED);
+    }
+    if (input.nineDeferral.fresh || current.decision_context_revision !== input.nineDeferral.revision) {
+      // The lead's revision moves on many things that do NOT end the conversation (a campaign
+      // text, a same-value re-import, an assignment...). So never drop the reply: discard the
+      // carried decision and decide again from scratch. The normal gates then exit silently
+      // when a newer inbound / a person's terminal dispo / an opt-out owns the thread.
+      await trace(supabase, {
+        kind: "action",
+        name: "nine_reply_deferred",
+        result: "applied",
+        detail: { engine: "nine_questions", why: "context_changed", redispatch: "fresh" },
+      }, runCtx);
+      const count = input.nineDeferral.count;
+      return runNineQuestionsStep(supabase, { ...a, input: { ...input, nineDeferral: undefined, nineDeferCount: count } });
+    }
+  }
+  // A deferred run reuses the deferring run's decision: the revision check above proved the
+  // lead did not change, so Jev is not asked again.
+  const cls = input.nineDeferral
+    ? {
+        kind: "ok" as const,
+        result: input.nineDeferral.result,
+        classificationRunId: input.nineDeferral.classificationRunId,
+        evaluationRevision: input.nineDeferral.revision,
+      }
+    : await runNineClassification(
+        supabase,
+        {
+          orgId: property.org_id,
+          propertyId: input.propertyId,
+          contactId: input.contactId,
+          conversationId: input.conversationId ?? null,
+          inboundMessageId: input.inboundMessageId ?? null,
+          inboundBody: input.inboundBody,
+        },
+        { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "", runContext: runCtx },
+      );
+  if (cls.kind === "failed") {
+    // Never falls back to the other engine: no trusted decision, so a person looks. A price
+    // keyword still makes it a hot hold (alert only), as in the eight-answer path, but hostile
+    // wording is checked first: that waits for a person's confirmation.
+    if (isHostileInbound(input.inboundBody)) return holdHostileForConfirm(supabase, input, claim, runCtx);
+    if (hasHotPriceKeyword(input.inboundBody, a.escalationKeywords)) {
+      return holdNinePriceKeyword(supabase, a, { kind: "nine_questions", failed: cls.reason });
+    }
+    return nineHoldAndComplete(supabase, a, `jev_automatic_failed:${cls.reason}`);
+  }
+  const { result } = cls;
+  const action = actionForNineAnswer(result.answer);
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_questions_route",
+    result: "applied",
+    detail: { engine: "nine_questions", answer: result.answer, action: action.kind },
+  }, runCtx);
+
+  // Hostile wording or a hostile answer: never an automatic reply, never an automatic DNC.
+  if (isHostileInbound(input.inboundBody) || result.answer === "hostile") {
+    return holdHostileForConfirm(supabase, input, claim, runCtx);
+  }
+
+  // PR 2: hot wins over everything but stop / hostile / wrong person (see nineYieldsToHotKeyword).
+  if (nineYieldsToHotKeyword(result.answer, input.inboundBody, a.escalationKeywords)) {
+    return holdNinePriceKeyword(supabase, a, { kind: "nine_questions", answer: result.answer });
+  }
+
+  if (action.kind === "hot") {
+    return routeNineHot(supabase, a, { classificationRunId: cls.classificationRunId, evaluationRevision: cls.evaluationRevision, result });
+  }
+
+  if (result.answer === "not_interested") {
+    const repeatNo = await routeNineRepeatNotInterested(supabase, a, {
+      classificationRunId: cls.classificationRunId,
+      evaluationRevision: cls.evaluationRevision,
+    });
+    if (repeatNo) return repeatNo;
+  }
+
+  if (action.kind === "continue_drip_if_last_was_drip") {
+    return routeNineJustOk(supabase, a, cls.evaluationRevision);
+  }
+
+  if (action.kind === "wait_for_person") {
+    // Spelled out so the hold-reason registry test sees each literal. Hostile never gets
+    // here (held for confirmation above); anything else unreadable waits as needs_person.
+    return nineHoldAndComplete(supabase, a, action.reason === "asked_stop" ? "nine_asked_stop" : "nine_needs_person");
+  }
+
+  if (action.kind === "drip_only") {
+    const dripResult = await enrollNineDrip(supabase, {
+      orgId: property.org_id,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      dripName: action.drip,
+      skipFirstStep: false,
+    });
+    const flagOk = await nineRecordDrip(supabase, a, action.drip, dripResult);
+    await completeClaim(supabase, input.propertyId, {
+      claimId: claim.claimId,
+      outcome: dripResult.status === "refused" ? "escalated" : "auto_closed",
+      ...(dripResult.status === "refused" ? { flagOk } : {}),
+    });
+    return dripResult.status === "refused"
+      ? { outcome: "escalated", reason: `drip_enroll_failed:${dripResult.reason}` }
+      : { outcome: "auto_closed", reason: "nine_questions:confirmed_owner" };
+  }
+
+  const chosenProbability = result.chosen?.probability ?? null;
+
+  if (action.kind === "reply_and_close_wrong_person") {
+    return closeNineWrongPersonThisProperty(supabase, a, {
+      evaluationRevision: cls.evaluationRevision,
+      classificationRunId: cls.classificationRunId,
+      chosenProbability,
+    });
+  }
+
+  // reply_and_drip: the drip only starts after the reply was accepted by the provider.
+  const noReply = async (why: string): Promise<AiDispatchOutcome | AiRetryOutcome> => {
+    // Refused at the provider fence because the lead changed after a deferral: silent exit.
+    // The send gate found a newer inbound (Q8 rule 1): that inbound's own run owns the thread.
+    // Not sent and no extra nine hold: the gate already flagged a person if its table says so.
+    if (why === "skipped:superseded_before_send" || why === "skipped:superseded_by_newer_inbound") {
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_enrolled",
+        result: "skipped",
+        detail: { why: "superseded", route: action.drip, engine: "nine_questions" },
+      }, runCtx);
+      await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "skipped", errorMessage: why });
+      return { outcome: "skipped", reason: why.slice("skipped:".length) };
+    }
+    if (input.nineDeferral && why.endsWith(NINE_DEFERRED_CONTEXT_CHANGED)) {
+      return redispatchNineFresh(supabase, a, {
+        evaluationRevision: cls.evaluationRevision,
+        classificationRunId: cls.classificationRunId,
+        result,
+      });
+    }
+    // Only a closed send window: wait for it to open instead of holding (A/B/C).
+    const deferred = await maybeDeferNineReply(supabase, a, why, {
+      evaluationRevision: cls.evaluationRevision,
+      classificationRunId: cls.classificationRunId,
+      result,
+    });
+    if (deferred) return deferred;
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "skipped",
+      detail: { why: "reply_not_sent", detail: why, route: action.drip, engine: "nine_questions" },
+    }, runCtx);
+    return nineHoldAndComplete(supabase, a, why === NINE_REPLY_TEXT_NOT_APPROVED ? why : `nine_reply_not_sent:${why}`);
+  };
+  if (!templateCtx) return noReply("reply_ineligible");
+
+  let messageId: string | null = null;
+  if (action.reply === "identity") {
+    if (input.replyDelayBypassed) return noReply(input.replyDelayBypassReason ?? TEMPLATE_DROP_DELAY_UNAVAILABLE);
+    const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
+    if (!safety.ok) return noReply(`safety:${safety.reason}`);
+    const identityRepeat = await templateAlreadySentToProperty(supabase, property.org_id, input.propertyId, null, IDENTITY_REPLY_BODY);
+    if (identityRepeat !== "no") {
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result: "skipped",
+        detail: { replyKind: "identity", reason: TEMPLATE_ALREADY_SENT, ...(identityRepeat === "error" ? { lookup: "failed" } : {}) },
+      }, runCtx);
+      return noReply(TEMPLATE_ALREADY_SENT);
+    }
+    // The identity text is not a library template, so the send path's recipient-window
+    // guards (approved_template only) would not stop it: check the recipient's clock here.
+    // A closed window waits for it to open (see maybeDeferNineReply), as a template does.
+    const identityWindow = await evaluateRecipientWindow(supabase, input);
+    if (!identityWindow.ok) {
+      await trace(supabase, {
+        kind: "reply",
+        name: "template_reply",
+        result: "held",
+        detail: { replyKind: "identity", window: identityWindow.why },
+      }, runCtx);
+      return noReply(`quiet_hours_recipient:${identityWindow.why}`);
+    }
+    const sent = await sendResponderMessage(supabase, {
+      runContext: runCtx,
+      input,
+      body: IDENTITY_REPLY_BODY,
+      model: templateCtx.model,
+      confidence: 1,
+      sentiment: "neutral",
+      turn: templateCtx.currentTurn + 1,
+      // As the wording shortcut does: a fixed approved text, not classed as a library template.
+      source: "llm",
+      orgId: property.org_id,
+      claimStartedAt: templateCtx.claimStartedAt,
+      outboundMode: templateCtx.outboundMode,
+      replyKind: "identity",
+      // Recipient window re-checked in the send path and at the provider fence; a
+      // window-only refusal comes back unflagged so it can be deferred below.
+      windowDeferrable: true,
+      // Fixed approved text, not model-written: exempt from AI_RESPONDER_LLM_AUTOSEND=0 only.
+      approvedFixedText: true,
+    });
+    if (
+      sent.outcome === "skipped" &&
+      (sent.reason === NINE_WINDOW_CLOSED || sent.reason === NINE_WINDOW_CLOSED_AT_FENCE || sent.reason === NINE_DEFERRED_CONTEXT_CHANGED)
+    ) {
+      return noReply(sent.reason);
+    }
+    if (sent.outcome === "retry") {
+      return settleClaimForSendOutcome(supabase, claim.claimId, { ...sent, reply: undefined }, {
+        orgId: property.org_id,
+        input,
+        body: IDENTITY_REPLY_BODY,
+        runContext: runCtx,
+      });
+    }
+    if (sent.outcome !== "sent") {
+      await settleClaimForSendOutcome(supabase, claim.claimId, sent, { orgId: property.org_id, input, body: IDENTITY_REPLY_BODY, runContext: runCtx });
+      await trace(supabase, {
+        kind: "action",
+        name: "drip_enrolled",
+        result: "skipped",
+        detail: { why: "reply_not_sent", detail: sent.outcome, route: action.drip, engine: "nine_questions" },
+      }, runCtx);
+      await holdWithRetry(supabase, input.propertyId, `nine_reply_not_sent:send_${sent.outcome}`, runCtx);
+      return { outcome: "escalated", reason: `nine_reply_not_sent:send_${sent.outcome}` };
+    }
+    messageId = sent.messageId;
+  } else {
+    const label = action.reply === "nurture" ? "nurture" : "not_interested";
+    const step = await runApprovedTemplateStep(supabase, {
+      input,
+      property,
+      ctx: templateCtx,
+      claim,
+      outcome: label,
+      nativeConfidence: chosenProbability,
+      escalationReason: "not_applicable",
+      decidedBy: "nine_questions",
+      requiredBody: APPROVED_REPLY_TEXTS[label],
+      windowDeferrable: true,
+      runCtx,
+    });
+    if (step.kind === "stop") return step.outcome;
+    if (!step.outboundMessageId || step.replyKey !== label) return noReply(step.notSentReason ?? "not_sent");
+    messageId = step.outboundMessageId;
+  }
+
+  // "Maybe later" is the nurture outcome, so the org's nurture auto-drip switch governs it
+  // (reply still went out; no enrolment, no hold: switching it off is a choice, not a failure).
+  // The other three drips have no such switch today and are not governed by it.
+  if (action.drip === "Maybe later" && !(await nineNurtureDripSwitchOn(supabase, property.org_id))) {
+    await trace(supabase, {
+      kind: "action",
+      name: "drip_enrolled",
+      result: "skipped",
+      detail: { why: "drip_switch_off", route: action.drip, engine: "nine_questions" },
+    }, runCtx);
+    await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed", outboundMessageId: messageId });
+    return { outcome: "auto_closed", reason: `nine_questions:${result.answer}` };
+  }
+  const dripResult = await enrollNineDrip(supabase, {
+    orgId: property.org_id,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    dripName: action.drip,
+    skipFirstStep: action.skipFirstStep,
+  });
+  const flagOk = await nineRecordDrip(supabase, a, action.drip, dripResult);
+  await completeClaim(supabase, input.propertyId, {
+    claimId: claim.claimId,
+    outcome: dripResult.status === "refused" ? "escalated" : "auto_closed",
+    ...(dripResult.status === "refused" ? { flagOk } : {}),
+    outboundMessageId: messageId,
+  });
+  return dripResult.status === "refused"
+    ? { outcome: "escalated", reason: `drip_enroll_failed:${dripResult.reason}` }
+    : { outcome: "auto_closed", reason: `nine_questions:${result.answer}` };
+}
+
+/** The drip paused by this inbound could not be resumed after a just_ok answer: a person looks. */
+export const NINE_JUST_OK_DRIP_RESUME_FAILED = "nine_just_ok_drip_resume_failed";
+
+/**
+ * just_ok (Jarrad 2026-10-21): the homeowner only acknowledged our text ("Ok", a thumbs up).
+ * Replay on 708 real replies 2026-10-21: just_ok was 100% precise.
+ *
+ * Acts ONLY when our last text to them (the same message Jev was shown as
+ * our_last_text_to_homeowner) was a drip step (`metadata.sequence_enrollment_id`, written by
+ * the sequence tick) or our approved check-back reply (the approved `not_interested` template,
+ * `metadata.reply_key`, with the approved body). Then: no reply, no hold, and the drip the
+ * inbound paused (`pause_reason = 'inbound_reply'`) is resumed so it simply continues.
+ * Anything else (an offer question, a person's text, nothing readable) is needs_person.
+ */
+async function routeNineJustOk(
+  supabase: SupabaseClient<Database>,
+  a: NineStepArgs,
+  evaluationRevision: number,
+): Promise<AiDispatchOutcome> {
+  const { input, claim, runCtx } = a;
+  const lastWasDrip = await nineLastOutboundWasDripOrCheckBack(supabase, input);
+  if (lastWasDrip === "no") {
+    await trace(supabase, {
+      kind: "action",
+      name: "nine_just_ok",
+      result: "skipped",
+      detail: { engine: "nine_questions", why: "last_text_not_drip" },
+    }, runCtx);
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  // Freshness: anything that moved the lead since this inbound was evaluated (a newer text, a
+  // person acting) owns the thread now, so this older "Ok" must not resume the drip.
+  const revisionNow = async (): Promise<number | null> => {
+    const { data, error: revError } = await supabase
+      .from("properties")
+      .select("decision_context_revision")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    return revError || !data ? null : data.decision_context_revision;
+  };
+  // The revision baseline is read inside classification, so a newer inbound that landed just
+  // before it would be inside both reads. Also require THIS inbound to be the newest one.
+  const isStillNewest = async (): Promise<boolean> => {
+    if (!input.inboundMessageId) return false;
+    const { data: src } = await supabase.from("messages").select("created_at").eq("id", input.inboundMessageId).maybeSingle();
+    if (!src) return false;
+    let q = supabase
+      .from("messages")
+      .select("id")
+      .eq("property_id", input.propertyId)
+      .eq("direction", "inbound")
+      .neq("id", input.inboundMessageId)
+      .gte("created_at", src.created_at)
+      .limit(1);
+    q = input.conversationId ? q.eq("conversation_id", input.conversationId) : q.eq("contact_id", input.contactId);
+    const { data: newer, error: newerError } = await q;
+    return !newerError && (newer ?? []).length === 0;
+  };
+  const fresh = async () => (await revisionNow()) === evaluationRevision && (await isStillNewest());
+  if (!(await fresh())) {
+    await trace(supabase, {
+      kind: "action",
+      name: "nine_just_ok",
+      result: "skipped",
+      detail: { engine: "nine_questions", why: "context_changed" },
+    }, runCtx);
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  const { data: paused, error } = await supabase
+    .from("sequence_enrollments")
+    .select("id")
+    .eq("property_id", input.propertyId)
+    .eq("status", "paused")
+    .eq("pause_reason", "inbound_reply");
+  if (error) return nineHoldAndComplete(supabase, a, NINE_JUST_OK_DRIP_RESUME_FAILED);
+  const resumed: string[] = [];
+  const notResumed: Array<{ id: string; outcome: string }> = [];
+  for (const row of paused ?? []) {
+    // The expected reason is re-checked under the enrolment lock (a person taking over or a
+    // Norma call in between is simply not resumed).
+    const { data, error: rpcError } = await supabase.rpc("resume_sequence_enrollment", {
+      p_enrollment_id: row.id,
+      p_actor_user_id: null,
+      p_expected_pause_reason: "inbound_reply",
+    });
+    const outcome = rpcError ? "error" : (data?.[0]?.outcome ?? "error");
+    if (outcome === "resumed") resumed.push(row.id);
+    else notResumed.push({ id: row.id, outcome });
+  }
+  // The resume RPC cannot check the lead's revision, so re-check after it: if anything moved the
+  // lead during the resume, pause the drip again and let a person look.
+  if (resumed.length > 0 && !(await fresh())) {
+    // Re-pause and VERIFY; retried, because the hold flag alone does not stop the drip tick.
+    let repaused = false;
+    for (let attempt = 0; attempt < 3 && !repaused; attempt++) {
+      try {
+        await pausePropertyEnrollments(supabase, { propertyId: input.propertyId, reason: "inbound_reply" });
+        const { data: still, error: stillError } = await supabase
+          .from("sequence_enrollments")
+          .select("id")
+          .in("id", resumed)
+          .eq("status", "active");
+        repaused = !stillError && (still ?? []).length === 0;
+      } catch (e) {
+        reportError(e, { tags: { surface: "nine_just_ok_repause" }, extra: { propertyId: input.propertyId, attempt } });
+      }
+    }
+    if (!repaused) {
+      reportError(new Error("just_ok re-pause not verified"), { tags: { surface: "nine_just_ok_repause" }, extra: { propertyId: input.propertyId, resumed } });
+      return nineHoldAndComplete(supabase, a, NINE_JUST_OK_DRIP_RESUME_FAILED);
+    }
+    return nineHoldAndComplete(supabase, a, "nine_needs_person");
+  }
+  if (resumed.length > 0) {
+    await recordLeadEvent({
+      propertyId: input.propertyId,
+      actorType: "system",
+      eventType: LEAD_EVENT_TYPES.SEQUENCE_RESUMED,
+      payload: { count: resumed.length, enrollment_ids: resumed, reason: "nine_questions:just_ok" },
+    });
+  }
+  // A resume that errored (or needs reconciliation) would leave the lead silent: a person looks.
+  // not_paused / norma_hold mean someone else already owns the drip state: nothing to do.
+  const failed = notResumed.filter(
+    (r) => r.outcome !== "not_paused" && r.outcome !== "norma_hold" && r.outcome !== "pause_reason_changed",
+  );
+  await trace(supabase, {
+    kind: "action",
+    name: "nine_just_ok",
+    result: failed.length > 0 ? "error" : "applied",
+    detail: { engine: "nine_questions", resumed, notResumed },
+  }, runCtx);
+  if (failed.length > 0) return nineHoldAndComplete(supabase, a, NINE_JUST_OK_DRIP_RESUME_FAILED);
+  await completeClaim(supabase, input.propertyId, { claimId: claim.claimId, outcome: "auto_closed" });
+  return { outcome: "auto_closed", reason: "nine_questions:just_ok" };
+}
+
+/** Fails closed ("no") on any read problem or a missing source inbound. */
+async function nineLastOutboundWasDripOrCheckBack(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<"yes" | "no"> {
+  if (!input.inboundMessageId) return "no";
+  const { data: inbound, error: inboundError } = await supabase
+    .from("messages")
+    .select("created_at")
+    .eq("id", input.inboundMessageId)
+    .eq("property_id", input.propertyId)
+    .maybeSingle();
+  if (inboundError || !inbound) return "no";
+  // Same thread scope and cut-off as buildTwoWayThreadState (what Jev was shown).
+  let query = supabase
+    .from("messages")
+    .select("body, metadata, status")
+    .eq("property_id", input.propertyId)
+    .eq("direction", "outbound")
+    .neq("id", input.inboundMessageId)
+    .lte("created_at", inbound.created_at)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  query = input.conversationId ? query.eq("conversation_id", input.conversationId) : query.eq("contact_id", input.contactId);
+  const { data: last, error } = await query.maybeSingle();
+  if (error || !last) return "no";
+  const meta = readJsonObject((last.metadata ?? null) as Json | null);
+  // Only a text the provider actually took counts. A retired / failed / still-queued attempt
+  // (its metadata may still carry reply_key or sequence_enrollment_id) is not proof the seller
+  // saw it: fail closed to needs_person.
+  if (last.status !== "sent" && last.status !== "delivered") return "no";
+  if (meta.abortedBeforeProvider === true || meta.aborted_inbound_message_id != null) return "no";
+  if (typeof meta.sequence_enrollment_id === "string" && meta.sequence_enrollment_id.length > 0) return "yes";
+  if (meta.reply_key === "not_interested" && last.body === APPROVED_REPLY_TEXTS.not_interested) return "yes";
+  return "no";
+}
+
+/** `ai_responder_configs.nurture_auto_drip`; any read problem counts as OFF (no enrolment). */
+async function nineNurtureDripSwitchOn(supabase: SupabaseClient<Database>, orgId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("ai_responder_configs")
+    .select("nurture_auto_drip")
+    .eq("org_id", orgId)
+    .eq("active", true)
+    .maybeSingle();
+  return !error && data?.nurture_auto_drip === true;
+}
+
+/**
+ * PR 2's hot hand-off, the ONE place it is applied for both engines: assign the lead to Jarrad
+ * and trace it. Returns null on success, or the escalated outcome (a hot hold: the alert cron
+ * still texts Jarrad) when the hand-off failed. Never auto-closes a failed hand-off.
+ */
+async function handOffHotLead(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  claim: { claimId: string | null },
+  runCtx?: MaybeRunContext,
+  inboundMessageId?: string | null,
+  onStatus?: (status: string) => void,
+): Promise<AiDispatchOutcome | null> {
+  const handoff = await assignHotLeadToOwner(supabase, propertyId, { inboundMessageId });
+  onStatus?.(handoff.status);
+  await trace(supabase, {
+    kind: "action",
+    name: "assign_hot_lead",
+    result: handoff.status === "failed" ? "error" : "applied",
+    detail: handoff.status === "failed"
+      ? { status: handoff.status, reason: handoff.reason }
+      : handoff.status === "owned_by_someone_else"
+        ? { status: handoff.status, owner_user_id: handoff.ownerUserId }
+        : handoff.status === "owned_by_someone_else_unrecorded"
+          ? { status: handoff.status, owner_user_id: handoff.ownerUserId, note: handoff.detail }
+        : handoff.status === "assigned_unrecorded"
+          ? { status: handoff.status, assignee_user_id: handoff.assigneeUserId, note: handoff.detail }
+          : { status: handoff.status, assignee_user_id: handoff.assigneeUserId },
+  }, runCtx);
+  if (handoff.status !== "failed" && handoff.status !== "assigned_unrecorded" && handoff.status !== "owned_by_someone_else_unrecorded") return null;
+  // assigned_unrecorded: the lead IS on My Leads, but its note did not save; the hold keeps a person in the loop.
+  const reason = handoff.status === "failed"
+    ? HOT_LEAD_ASSIGN_FAILED_REASON
+    : handoff.status === "owned_by_someone_else_unrecorded"
+      ? HOT_ALERT_EVENT_FAILED_REASON
+      : HOT_LEAD_EVENT_FAILED_REASON;
+  let ourFlagAt: string | null = null;
+  const flagOk = await markPropertyNeedsAttention(supabase, propertyId, reason, runCtx, NO_GUARD, (at) => {
+    ourFlagAt = at;
+  });
+  // Shares the hold's alert key only when THIS call set the flag; otherwise its own key.
+  await recordHotFailure(supabase, propertyId, inboundMessageId, reason, ourFlagAt);
+  await completeClaim(supabase, propertyId, {
+    claimId: claim.claimId,
+    outcome: "escalated",
+    flagOk,
+    errorMessage: handoff.status === "failed" ? handoff.reason : handoff.detail,
+  });
+  return { outcome: "escalated", reason };
 }

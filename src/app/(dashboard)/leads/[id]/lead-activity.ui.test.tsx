@@ -1,5 +1,5 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CallActivityRollupRow } from "./lead-call-summary";
 import type { LeadEvent } from "./lead-events";
@@ -208,11 +208,50 @@ describe("<LeadActivityTimeline /> with lead events", () => {
     expect(bubbles[0]).toHaveAttribute("data-continuation", "false");
     expect(bubbles[1]).toHaveAttribute("data-continuation", "true");
     expect(bubbles[1]).toHaveTextContent("Outbound → Seller");
-    expect(bubbles[1]).toHaveTextContent("Existing SMS bubble stays intact");
-    expect(screen.getAllByTestId("messages-thread-metadata")).toHaveLength(1);
+    expect(bubbles[0]).toHaveTextContent("Existing SMS bubble stays intact");
+    expect(bubbles[1]).toHaveTextContent("First existing SMS bubble");
+    expect(screen.getAllByTestId("messages-thread-metadata")).toHaveLength(2);
     expect(
       screen.getByTestId("messages-thread-delivery-status"),
     ).toHaveTextContent("Queued · in Outbox");
+  });
+
+  it("keeps the newest inbound STOP badge and each timestamp visible", () => {
+    const older = { ...message({ id: "older", body: "Hello", createdAt: "2026-08-25T17:00:00Z", status: "received" }), direction: "inbound" as const };
+    const newer = { ...older, id: "newer", body: "stop", created_at: "2026-08-25T18:00:00Z", metadata: { keyword: "stop" } };
+    render(<LeadActivityTimeline propertyId="property-1" contactId={null} initialMessages={[older, newer]} initialNotes={[]} initialCalls={[]} initialEvents={[]} messageError={null} noteError={null} callError={null} eventError={null} authorEmails={{}} currentUserId={null} currentUserEmail={null} jitterHost="" />);
+    const rows = screen.getAllByTestId("messages-thread-msg");
+    expect(within(rows[0]).getByText("STOP", { exact: true })).toBeVisible();
+    expect(within(rows[0]).getByTestId("messages-thread-metadata")).toBeVisible();
+    expect(within(rows[1]).getByTestId("messages-thread-metadata")).toBeVisible();
+  });
+
+  it("keeps newly received activity first and older-history controls last", () => {
+    const props = {
+      propertyId: "property-1", contactId: null,
+      initialMessages: [], initialNotes: [], initialCalls: [], initialEvents: [],
+      messageError: null, noteError: null, callError: null, eventError: null,
+      authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
+    };
+    const first = message({ id: "first", body: "Earlier message", createdAt: "2026-08-25T17:00:00Z", status: "sent" });
+    const latest = message({ id: "latest", body: "Newest message", createdAt: "2026-08-25T18:00:00Z", status: "sent" });
+    const history = {
+      ok: true as const,
+      page: {
+        rows: [{ kind: "offer" as const, id: "offer-old", at: "2026-08-25T16:00:00Z", actorId: null, amountCents: "10000", method: "verbal" as const, followUpAt: "2026-08-26T16:00:00Z", outcome: "pending" as const, outcomeAt: null }],
+        hasMore: true, cursor: null,
+      },
+    };
+    const view = render(<LeadActivityTimeline {...props} initialMessages={[first]} initialAcquisitionHistory={history} />);
+    view.rerender(<LeadActivityTimeline {...props} initialMessages={[first, latest]} initialAcquisitionHistory={history} />);
+    const bubbles = screen.getAllByTestId("messages-thread-msg");
+    expect(bubbles[0]).toHaveTextContent("Newest message");
+    expect(bubbles[1]).toHaveTextContent("Earlier message");
+    const offer = screen.getByTestId("lead-acquisition-offer-offer-old");
+    const boundary = screen.getByTestId("lead-activity-trust-floor");
+    const more = screen.getByRole("button", { name: "Load older outreach and offers" });
+    expect(offer.compareDocumentPosition(boundary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(boundary.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("clears a stale server activity error after an empty live reconciliation", async () => {
@@ -309,6 +348,7 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
       initialCalls={[
         {
           id: "physical-call",
+          provider_recording_url: "https://dialpad.com/recording.mp3",
           created_at: "2026-08-25T18:00:00.000Z",
           started_at: "2026-08-25T18:00:00.000Z",
           outcome: "completed",
@@ -339,6 +379,8 @@ it("retains reached, rep note, actor and recording time inside one linked Sandra
   );
   expect(screen.getAllByTestId("lead-activity-call")).toHaveLength(1);
   const physicalCall = within(screen.getByTestId("lead-activity-call"));
+  expect(physicalCall.getByText("Provider recording reference received. Playback is not available in Sandra.")).toBeVisible();
+  expect(physicalCall.queryByText("No recording captured")).not.toBeInTheDocument();
   expect(physicalCall.getByText("Reached")).toBeInTheDocument();
   expect(
     physicalCall.getByText("Seller wants a Friday callback"),
@@ -364,4 +406,52 @@ it.each(["", "https://jitter.example.test"])("chooses history actions per provid
   expect(screen.queryAllByRole("link", { name: "Open call in Jitter" })).toHaveLength(jitterHost ? 1 : 0);
   if (jitterHost) expect(screen.getByRole("link", { name: "Open call in Jitter" })).toHaveAttribute("href", "https://jitter.example.test/history?prospect_id=property-123");
   expect(cards).toHaveLength(3);
+});
+
+describe("<LeadActivityTimeline /> voicemail drops", () => {
+  const props = {
+    propertyId: "property-1", contactId: "contact-1", initialMessages: [], initialNotes: [], initialCalls: [], initialEvents: [],
+    messageError: null, noteError: null, callError: null, eventError: null,
+    authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
+  };
+  const drop = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
+    id, status, attempt_outcome: "queued", reason: null, reason_code: null, proof_url: null, audio_kind: "tts",
+    queued_at: "2026-10-20T14:00:00Z", completed_at: null, created_at: "2026-10-20T14:00:00Z", ...extra,
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-21T12:00:00Z"));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("shows queued, delivered with proof link, and failed with a plain reason", () => {
+    render(<LeadActivityTimeline {...props} initialVoicemailDrops={[
+      drop("d1", "queued"),
+      drop("d2", "delivered", { completed_at: "2026-10-20T15:00:00Z", proof_url: "https://proof.example/d2" }),
+      drop("d3", "failed", { completed_at: "2026-10-20T16:00:00Z", reason_code: "4002" }),
+    ]} />);
+    const cards = screen.getAllByTestId("lead-voicemail-drop");
+    expect(cards.map((card) => card.dataset.status)).toEqual(["failed", "delivered", "queued"]);
+    expect(within(cards[0]).getByText("Voicemail not delivered")).toBeInTheDocument();
+    expect(within(cards[0]).getByText("Voicemail box full.")).toBeInTheDocument();
+    expect(within(cards[1]).getByRole("link", { name: /Proof of delivery/ })).toHaveAttribute("href", "/api/voicemail-drops/d2/proof");
+    expect(within(cards[2]).getByText("Voicemail queued")).toBeInTheDocument();
+    expect(screen.queryByText(/No messages, notes, calls/)).not.toBeInTheDocument();
+  });
+
+  it("hides a non-https proof link", () => {
+    render(<LeadActivityTimeline {...props} initialVoicemailDrops={[drop("d1", "delivered", { proof_url: "javascript:alert(1)" })]} />);
+    expect(screen.queryByRole("link", { name: /Proof of delivery/ })).not.toBeInTheDocument();
+  });
+
+  it("links a stored copy after the provider link expired, and hides an expired provider-only link", () => {
+    render(<LeadActivityTimeline {...props} initialVoicemailDrops={[
+      drop("d1", "delivered", { completed_at: "2026-10-01T15:00:00Z", proof_url: "https://proof.example/d1", proof_url_at: "2026-10-01T15:00:00Z", proof_storage_path: "org/d1.mp3" }),
+      drop("d2", "delivered", { completed_at: "2026-10-01T16:00:00Z", proof_url: "https://proof.example/d2", proof_url_at: "2026-10-01T16:00:00Z" }),
+    ]} />);
+    const cards = screen.getAllByTestId("lead-voicemail-drop");
+    expect(within(cards[0]).queryByRole("link", { name: /Proof of delivery/ })).not.toBeInTheDocument();
+    expect(within(cards[1]).getByRole("link", { name: /Proof of delivery/ })).toHaveAttribute("href", "/api/voicemail-drops/d1/proof");
+  });
 });

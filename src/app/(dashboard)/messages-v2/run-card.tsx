@@ -6,10 +6,30 @@ import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
+import { chicagoMonthDay } from "./chicago-time";
+
 import { readJevScores, replyPersona } from "./step-format";
 import type { PipelineRunStep, RunLabel, RunWithSteps } from "./types";
 
 const ENTER = "animate-in fade-in slide-in-from-top-1 duration-300";
+
+const DRIP_ROUTE_LABELS: Record<string, string> = {
+  maybe_later: "Maybe later",
+  check_in_60: "Check in every 60 days",
+  listed_not_selling: "Listed, not selling",
+  hot_book_appointment: "Book appointment",
+};
+
+/** "Maybe later, first text Nov 6" for an applied auto-drip step, else null. */
+export function dripEnrollmentSummary(step: PipelineRunStep): string | null {
+  if (step.name !== "drip_enrolled" || step.result !== "applied") return null;
+  const route = typeof step.detail?.route === "string" ? step.detail.route : null;
+  const label = route ? (DRIP_ROUTE_LABELS[route] ?? route) : null;
+  const at = typeof step.detail?.firstSendNotBefore === "string" ? new Date(step.detail.firstSendNotBefore) : null;
+  const when = at && !Number.isNaN(at.getTime()) ? `first text ${chicagoMonthDay(at)}` : null;
+  const parts = [label, when].filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+}
 
 export function StepLine({ step }: { step: PipelineRunStep }) {
   const base = cn("flex items-baseline gap-2 text-sm", ENTER);
@@ -55,6 +75,11 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
           <span>{step.name}</span>
           {step.result !== "applied" && (
             <span className="text-muted-foreground">({step.result})</span>
+          )}
+          {dripEnrollmentSummary(step) && (
+            <span data-testid="drip-enrollment" className="text-muted-foreground">
+              {dripEnrollmentSummary(step)}
+            </span>
           )}
         </li>
       );
@@ -126,13 +151,18 @@ export function hasUndoableJevAction(run: Pick<RunWithSteps, "steps">): boolean 
   );
 }
 
+/** Routing v2 (PR-I): Sandra wrote an automatic `model_stop` suppression for this text. */
+export function hasUndoableModelStop(run: Pick<RunWithSteps, "steps">): boolean {
+  return run.steps.some((s) => s.kind === "action" && s.result === "applied" && s.name === "routing_v2_stop");
+}
+
 export type UndoControls = {
   /** Returns the undo record id while the action is still undoable, else null. */
   find: (inboundMessageId: string) => Promise<string | null>;
   undo: (undoId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
 };
 
-function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: string; controls: UndoControls }) {
+export function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: string; controls: UndoControls }) {
   const [undoId, setUndoId] = useState<string | null>(null);
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -153,7 +183,7 @@ function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: strin
   if (state === "done") {
     return (
       <p data-testid="undo-done" className="mt-2 text-xs text-muted-foreground">
-        Undone. The lead is back the way it was before Jev acted.
+        Undone. The lead is back the way it was before Sandra acted.
       </p>
     );
   }
@@ -176,7 +206,7 @@ function UndoJevButton({ inboundMessageId, controls }: { inboundMessageId: strin
         }}
         className="rounded-md border px-2 py-1 text-xs hover:bg-secondary disabled:opacity-50"
       >
-        {state === "busy" ? "Undoing..." : "Undo Jev's action"}
+        {state === "busy" ? "Undoing..." : "Undo"}
       </button>
       {error && (
         <span role="alert" data-testid="undo-error" className="text-xs text-destructive">
@@ -192,11 +222,14 @@ export function RunCard({
   label,
   isOwner = false,
   undoControls,
+  stopUndoControls,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
   isOwner?: boolean;
   undoControls?: UndoControls;
+  /** Routing v2: lift an automatic model_stop suppression (audited; carrier STOP stays). */
+  stopUndoControls?: UndoControls;
 }) {
   const threadHref = openThreadHref(run, isOwner);
   const name = label?.name ?? "Unknown sender";
@@ -207,6 +240,7 @@ export function RunCard({
     (s) => !(s.kind === "gate" && s.result === "pass"),
   );
   const running = run.status === "running";
+  const autoDripped = run.steps.some((st) => dripEnrollmentSummary(st) !== null);
 
   return (
     <article
@@ -265,8 +299,25 @@ export function RunCard({
         )}
       </ul>
 
+      {autoDripped && run.property_id && (
+        <p data-testid="drip-stop-hint" className="mt-2 text-xs text-muted-foreground">
+          Auto-enrolled in a drip.{" "}
+          <a
+            href={`/leads/${encodeURIComponent(run.property_id)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-4 hover:text-foreground"
+          >
+            Stop it from the lead page
+          </a>
+        </p>
+      )}
+
       {undoControls && hasUndoableJevAction(run) && (
         <UndoJevButton inboundMessageId={run.inbound_message_id} controls={undoControls} />
+      )}
+      {stopUndoControls && hasUndoableModelStop(run) && (
+        <UndoJevButton inboundMessageId={run.inbound_message_id} controls={stopUndoControls} />
       )}
 
       {threadHref && (

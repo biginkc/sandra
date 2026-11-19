@@ -33,6 +33,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/routing-v2-outbox",
+      "schedule": "*/1 * * * *"
+    },
+    {
       "path": "/api/cron/sweep-stuck-skip-trace",
       "schedule": "*/1 * * * *"
     },
@@ -79,6 +83,10 @@
     {
       "path": "/api/cron/direct-recording-sweep",
       "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/cron/voicemail-proof-sweep",
+      "schedule": "*/5 * * * *"
     },
     {
       "path": "/api/cron/norma-reconciliation",

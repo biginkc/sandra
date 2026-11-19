@@ -43,3 +43,18 @@ it("preserves legacy metrics while new RPC fields are unavailable during rollout
   expect(screen.getByTestId("kpi-missing-recordings")).toHaveTextContent("Recording coverage unavailable")
   expect(container).not.toHaveTextContent(/undefined|NaN|No calls today/)
 })
+
+it("hideAttention drops the Needs attention tiles and keeps the six activity tiles", () => {
+  render(<MyLeadsMetrics kpis={kpis} hideAttention />)
+  expect(screen.getAllByTestId(/^kpi-/)).toHaveLength(6)
+  expect(screen.queryByRole("heading", { name: /Needs attention/ })).not.toBeInTheDocument()
+  for (const id of ["contact-without-follow-up", "needs-offers", "appointments-overdue", "replied-to-drip"]) {
+    expect(screen.queryByTestId(`kpi-${id}`)).not.toBeInTheDocument()
+  }
+  expect(screen.getByTestId("kpi-contacts")).toHaveTextContent("0 / 0")
+})
+it("keeps the attention tiles when hideAttention is false", () => {
+  render(<MyLeadsMetrics kpis={kpis} hideAttention={false} />)
+  expect(screen.getAllByTestId(/^kpi-/)).toHaveLength(10)
+  expect(screen.getByRole("heading", { name: /Needs attention/ })).toBeInTheDocument()
+})

@@ -432,6 +432,24 @@ describe("processEnrollmentTick — advancement persistence", () => {
     expect(enrollment.next_run_at).toEqual(expect.any(String));
   });
 
+  it("a transient stop-texting/hostile hold read failure retries instead of pausing", async () => {
+    // send.ts reads the hold before sequence authorization, so the claim is still
+    // not_attempted when this outcome comes back.
+    vi.mocked(sendSmsToContact).mockResolvedValue({
+      status: "blocked_fresh_state_unavailable",
+      messageId: "msg-h",
+      error: "hold state reload: read timeout",
+    });
+    const { client, enrollment } = fixture();
+
+    const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+
+    expect(outcome).toMatchObject({ status: "rescheduled_consent_unavailable", enrollmentId: "enrollment-1" });
+    expect(enrollment.status).toBe("active");
+    expect(enrollment.pause_reason ?? null).toBeNull();
+    expect(enrollment.next_run_at).toEqual(expect.any(String));
+  });
+
   it("does not pause as provider_failed: records not_attempted/consent_unavailable and reschedules for retry", async () => {
     vi.mocked(sendSmsToContact).mockResolvedValue({
       status: "blocked_fresh_state_unavailable",
@@ -616,6 +634,8 @@ describe("processEnrollmentTick — change_status DNC race", () => {
         if (propertyCall === 2) return makeQueryResult(null);
         return makeQueryResult({ is_dnc_locked: true });
       }
+      // Legacy drip (routing_v2_key null): the routing v2 gate passes straight through.
+      if (table === "sequences") return makeQueryResult({ routing_v2_key: null });
       if (table === "sequence_step_runs") {
         return makeQueryResult({ id: "run-1" });
       }
@@ -669,6 +689,8 @@ describe("processEnrollmentTick — change_status DNC race", () => {
         if (propertyCall === 2) return makeQueryResult(null);
         return makeQueryResult({ is_dnc_locked: true });
       }
+      // Legacy drip (routing_v2_key null): the routing v2 gate passes straight through.
+      if (table === "sequences") return makeQueryResult({ routing_v2_key: null });
       if (table === "sequence_step_runs") {
         return makeQueryResult({ id: "run-1" });
       }

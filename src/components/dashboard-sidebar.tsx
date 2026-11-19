@@ -118,6 +118,7 @@ export function DashboardSidebar({
   showMessagesV2 = false,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
+  acquisitionBadgeNeedsAttention = false,
 }: {
   activePathname?: string;
   showCalculators?: boolean;
@@ -128,6 +129,7 @@ export function DashboardSidebar({
   showMessagesV2?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
+  acquisitionBadgeNeedsAttention?: boolean;
 }) {
   const routePathname = usePathname();
   const pathname = activePathname ?? routePathname;
@@ -167,6 +169,7 @@ export function DashboardSidebar({
               <MyLeadsNavBadge
                 initialCount={initialAcquisitionBadge}
                 onRefresh={onRefreshAcquisitionBadge}
+                needsAttention={acquisitionBadgeNeedsAttention}
               />
             )}
           </Link>
@@ -185,6 +188,7 @@ export function DashboardMobileNav({
   showMessagesV2 = false,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
+  acquisitionBadgeNeedsAttention = false,
 }: {
   showCalculators?: boolean;
   showMyLeads?: boolean;
@@ -194,6 +198,7 @@ export function DashboardMobileNav({
   showMessagesV2?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
+  acquisitionBadgeNeedsAttention?: boolean;
 }) {
   const pathname = usePathname();
   const items = visibleItems(
@@ -230,6 +235,7 @@ export function DashboardMobileNav({
               <MyLeadsNavBadge
                 initialCount={initialAcquisitionBadge}
                 onRefresh={onRefreshAcquisitionBadge}
+                needsAttention={acquisitionBadgeNeedsAttention}
               />
             )}
           </Link>

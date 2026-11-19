@@ -115,3 +115,9 @@ describe("second prompt for an already-saved call", () => {
     expect(getExtras("user-1", "k1")).toBeNull()
   })
 })
+
+// The drip picker reads over GET; route it through the mocked server action so existing fixtures apply.
+vi.mock("@/lib/sequences/drip-choices-client", async () => {
+  const actions = await import("@/app/(dashboard)/sequences/actions");
+  return { fetchDripChoices: () => actions.listDripChoices() };
+});

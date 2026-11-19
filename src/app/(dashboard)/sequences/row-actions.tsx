@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { callAction } from "@/lib/errors/call-action";
 import { archiveSequence, restoreSequence, updateSequence } from "./actions";
 
-export function SequenceRowActions({ sequenceId, isArchived, isActive }: { sequenceId: string; isArchived: boolean; isActive: boolean }) {
+export function SequenceRowActions({ sequenceId, isArchived, isActive, managed = false }: { sequenceId: string; isArchived: boolean; isActive: boolean; managed?: boolean }) {
   const router = useRouter();
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [pending, startTransition] = useTransition();
@@ -25,6 +25,8 @@ export function SequenceRowActions({ sequenceId, isArchived, isActive }: { seque
       if (result.ok) { setConfirmArchive(false); router.refresh(); }
     });
   }
+  // Automatic reply drips (routing v2) are managed by Sandra itself: no edit / archive / open-close.
+  if (managed) return <div className="text-muted-foreground text-right text-xs whitespace-nowrap">Automatic drip</div>;
   return <div className="flex items-center justify-end gap-1 whitespace-nowrap">
     <Link href={`/sequences/${sequenceId}/edit`}><Button variant="ghost" size="sm">Edit</Button></Link>
     <DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" size="sm" disabled={pending} />}>Actions</DropdownMenuTrigger>

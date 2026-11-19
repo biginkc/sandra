@@ -35,8 +35,33 @@ export async function pickFromPool(
     .order("id"); // stable order so the same index always maps to the same row
 
   if (error || !data || data.length === 0) return null;
+  return data[poolIndex(seed, data.length)];
+}
 
+/** SHA-256(seed) mod size: the same seed always maps to the same slot. */
+export function poolIndex(seed: string, size: number): number {
   const hash = crypto.createHash("sha256").update(seed).digest();
-  const index = hash.readUInt32BE(0) % data.length;
-  return data[index];
+  return hash.readUInt32BE(0) % size;
+}
+
+/**
+ * Pick one saved voicemail script from a group, the same way pickFromPool
+ * picks SMS templates. Reads voicemail_templates only, never sms_templates,
+ * so a text template can never be read aloud.
+ */
+export async function pickVoicemailFromPool(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  category: string,
+  seed: string,
+): Promise<PoolTemplate | null> {
+  const { data, error } = await supabase
+    .from("voicemail_templates")
+    .select("id, content")
+    .eq("org_id", orgId)
+    .eq("category", category)
+    .is("deleted_at", null)
+    .order("id");
+  if (error || !data || data.length === 0) return null;
+  return data[poolIndex(seed, data.length)];
 }

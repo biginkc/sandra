@@ -23,12 +23,15 @@ export type PauseEvent =
 export type PauseReason =
   | "inbound_reply"
   | "rep_sms_human_takeover"
+  | "person_took_over"
   | "status_terminal"
   | "status_acquisition_active"
   | "consent_revoked"
   | "appointment_booked"
   | "call_in_progress"
-  | "norma_call";
+  | "norma_call"
+  /** Seller called back (Norma inbound call record matched to the contact). */
+  | "inbound_call";
 
 export type PauseDecision = {
   shouldPause: boolean;

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { resolveSafetyObligationsByPerson } from "@/lib/ai-responder/safety-obligations";
 import { HOSTILE_NEEDS_CONFIRM_REASON, confirmDncInboundId, isConfirmDncReason } from "@/lib/ai-responder/hostile";
 import type { HumanDraftSendInput, HumanDraftSendResult } from "@/lib/ai-responder/dispatch";
 import { err, ok, type Result } from "@/lib/errors/result";
@@ -58,6 +59,11 @@ export type HoldActionDeps = {
   /** The existing lead assignment action (leads/actions.ts). */
   updateLeadAssignee: (propertyId: string, userId: string | null) => Promise<Result<null>>;
   reportError: (error: unknown, context?: { tags?: Record<string, string>; extra?: Record<string, unknown> }) => void;
+  /**
+   * Does the draft still resolve to exactly this unlocked, same-org property (its own id, run, message or
+   * conversation)? Run INSIDE the property lease, after the re-read, before any write or send.
+   */
+  draftOwner: (draftId: string, propertyId: string) => Promise<"ok" | "stale" | null>;
 };
 
 /** Longest reply a human may send from a hold (SMS concatenation ceiling, not a content rule). */
@@ -262,6 +268,8 @@ async function performSend(
     },
   ];
   try {
+    // Round 18: the person's action resolves the lead's routing v2 safety obligations first.
+    await resolveSafetyObligationsByPerson(d.admin as never, draft.property_id);
     const { data: cleared, error } = await d.admin
       .from("properties")
       .update({
@@ -351,19 +359,36 @@ export async function withPropertyLease<T>(
 }
 
 /** Send the draft the clicker saw, exactly as they saw it. */
+/**
+ * The draft must belong to the property the clicker saw, checked again INSIDE the lease after the re-read (a
+ * reassignment between an early check and the lease must not send for another property).
+ */
+async function ownedByExpected(d: HoldActionDeps, draft: DraftRow, leasedPropertyId: string, expected: string): Promise<Result<null>> {
+  if (draft.property_id !== expected || leasedPropertyId !== expected) return fail("HOLD_STALE", DRAFT_MOVED_MESSAGE);
+  const verdict = await d.draftOwner(draft.id, expected);
+  if (verdict !== "ok") return fail("HOLD_STALE", verdict === "stale" ? DRAFT_MOVED_MESSAGE : "Could not confirm the draft. Nothing was sent; refresh and try again.");
+  return ok(null);
+}
+
+const DRAFT_MOVED_MESSAGE = "This draft no longer belongs to this lead. Nothing was sent; refresh to see where it is now.";
+
 export async function sendHeldDraft(
   d: HoldActionDeps,
-  input: { draftId: string; seen: SeenDraft },
+  input: { draftId: string; seen: SeenDraft; expectedPropertyId: string },
 ): Promise<Result<{ messageId: string }>> {
   const first = await loadDraft(d, input.draftId);
   if (!first.ok) return first;
   if (!first.data.property_id) {
     return fail("DRAFT_NOT_SENDABLE", "This draft is not tied to a seller text, so it cannot be sent from here.");
   }
-  return withPropertyLease(d, first.data.property_id, first.data.inbound_message_id ?? null, async () => {
+  if (first.data.property_id !== input.expectedPropertyId) return fail("HOLD_STALE", DRAFT_MOVED_MESSAGE); // fast fail
+  const leased = first.data.property_id;
+  return withPropertyLease(d, leased, first.data.inbound_message_id ?? null, async () => {
     // Re-read under the lease: a Dismiss that finished first leaves it discarded.
     const draft = await loadDraft(d, input.draftId);
     if (!draft.ok) return draft;
+    const owned = await ownedByExpected(d, draft.data, leased, input.expectedPropertyId);
+    if (!owned.ok) return owned;
     const seen = checkSeen(draft.data, input.seen);
     if (!seen.ok) return seen;
     const body = (draft.data.edited_body ?? draft.data.body).trim();
@@ -374,7 +399,7 @@ export async function sendHeldDraft(
 /** Record the edit on the draft row, then send the edited text. */
 export async function editAndSendHeldDraft(
   d: HoldActionDeps,
-  input: { draftId: string; body: string; seen: SeenDraft },
+  input: { draftId: string; body: string; seen: SeenDraft; expectedPropertyId: string },
 ): Promise<Result<{ messageId: string }>> {
   const body = input.body.trim();
   if (!body || body.length > MAX_EDIT_LENGTH) {
@@ -388,9 +413,13 @@ export async function editAndSendHeldDraft(
   if (!first.data.property_id) {
     return fail("DRAFT_NOT_SENDABLE", "This draft is not tied to a seller text, so it cannot be sent from here.");
   }
-  return withPropertyLease(d, first.data.property_id, first.data.inbound_message_id ?? null, async () => {
+  if (first.data.property_id !== input.expectedPropertyId) return fail("HOLD_STALE", DRAFT_MOVED_MESSAGE); // fast fail
+  const leased = first.data.property_id;
+  return withPropertyLease(d, leased, first.data.inbound_message_id ?? null, async () => {
     const draft = await loadDraft(d, input.draftId);
     if (!draft.ok) return draft;
+    const owned = await ownedByExpected(d, draft.data, leased, input.expectedPropertyId);
+    if (!owned.ok) return owned;
     // The edit is based on the text they saw; if the draft moved, nothing is written or sent.
     const seen = checkSeen(draft.data, input.seen);
     if (!seen.ok) return seen;
@@ -644,6 +673,7 @@ export async function confirmDoNotContact(
     const now = new Date().toISOString();
     const events: HoldEvent[] = [];
     try {
+      await resolveSafetyObligationsByPerson(d.admin as never, input.propertyId);
       const { data: cleared, error } = await d.admin
         .from("properties")
         .update({ needs_human_attention: false, last_ai_escalation_reason: null, last_ai_escalation_at: null, updated_at: now })

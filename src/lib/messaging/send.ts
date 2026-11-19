@@ -1,6 +1,8 @@
+import { CONFIRM_HOLD_BLOCK_REASON, hasOpenConfirmHold } from "./confirm-hold";
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { assertCanaryDispatchEligibility } from "../../../scripts/sequence-canary-fixture";
 import { assertCanarySendBinding } from "@/lib/sequences/canary-runtime-proof";
+import { checkSendAllowed, TEST_SEND_REFUSED } from "./send-allowlist";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -31,6 +33,13 @@ import {
 } from "./suppression";
 import { assertSendilloOrganizationScope } from "./rep-sms-scope";
 import { hasOpeningIdentity, openingIdentityError } from "./opening-identity";
+
+/** §5.4: the lead's test tag could not be read (transient); see checkSendAllowed. */
+const TEST_TAG_UNREADABLE = "test_tag_unreadable";
+/** A routing v2 safety obligation is unresolved on the lead: an automated send waits (Opus N6 on #956). */
+const OBLIGATION_UNRESOLVED = "obligation_unresolved";
+/** A queued text whose test tag could not be read is retried this much later. */
+const TEST_TAG_RETRY_MS = 5 * 60_000;
 
 /**
  * Core "send one outbound SMS" operation. Called from the lead-detail
@@ -308,7 +317,13 @@ export type SendSmsOutcome =
    * uniqueness-bearing stamp released (see `retireRefusedRow`): the caller must
    * not retry over it.
    */
-  | { status: "blocked_before_provider"; messageId: string; retired: boolean }
+  | {
+      status: "blocked_before_provider";
+      messageId: string;
+      retired: boolean;
+      /** §5.4: a confirmed test-tagged send to a non-owned number. Terminal: never retry. */
+      refusal?: typeof TEST_SEND_REFUSED;
+    }
   | { status: "queued"; messageId: string; toAddress?: string }
   | { status: "paused"; messageId: string; toAddress?: string }
   /** A bulk-campaign destination is already represented by an outbound row. */
@@ -363,6 +378,9 @@ export type SendSmsOutcome =
        * when `origin: 'automated'`; manual sends don't run this re-check
        * at all, so they're unaffected. The row is marked `status: 'failed'`
        * (never retried) so the queue doesn't loop on an unresolved read.
+       * Also returned, for ANY origin, when the §5.4 test-run tag could not be read
+       * (`error: "test_tag_unreadable"`); a queued row is then put back in the queue a
+       * little later instead of being failed.
        */
       status: "blocked_fresh_state_unavailable";
       /** Absent when the unreadable state was caught before a row existed. */
@@ -457,6 +475,12 @@ export type SendSmsInput = {
    * `evaluateAutomatedSuppression` in ./suppression.
    */
   origin: "automated" | "manual";
+  /**
+   * A person clicked Send on this text (a held draft from the Messages v2 hold card). It keeps
+   * origin "automated" for every consent / suppression re-check, but it is never refused by the
+   * routing v2 safety-obligation gate: a person sending is not an automated send.
+   */
+  personInitiated?: boolean;
   /** Contact to send to. We prefer a saved mobile across phone_1/2/3. */
   contactId: string;
   /** Linked property — required for quiet-hours zone + thread continuity. */
@@ -486,6 +510,8 @@ export type SendSmsInput = {
   queueOnly?: boolean;
   scheduledFor?: Date | null;
   metadata?: Json | null;
+  /** The person behind a manual send, for the audit trail when a takeover pauses a drip. Defaults to the system actor. */
+  takeoverActorId?: string | null;
   campaignId?: string | null;
   /**
    * Bulk campaigns opt into a final destination check immediately before the
@@ -531,6 +557,11 @@ export type SendSmsInput = {
   /** Tenant-scoped replay key for a manual rep SMS submission. */
   idempotencyKey?: string | null;
   /**
+   * §5.4: the work item's test tag (e.g. a routing v2 outbox row's test_run_id). The lead's
+   * own properties.test_run_id is always read at the provider boundary too.
+   */
+  testRunId?: string | null;
+  /**
    * Service-owned rep SMS reservation. When present, this ledger is the
    * replay authority and messages.idempotency_key is intentionally ignored.
    */
@@ -540,6 +571,38 @@ export type SendSmsInput = {
 };
 
 export async function sendSmsToContact(
+  supabase: SupabaseClient<Database>,
+  input: SendSmsInput,
+  manualDispatch?: { provider: MessagingProvider; authorize: (messageId: string) => Promise<void> },
+): Promise<SendSmsOutcome> {
+  const outcome = await sendSmsToContactInner(supabase, input, manualDispatch);
+  const meta = input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata) ? input.metadata : null;
+  if (
+    input.origin === "manual" &&
+    outcome.status === "sent" &&
+    input.propertyId &&
+    // A scheduled seller reminder is sent on a person's behalf by the system, not a takeover.
+    meta?.kind !== "seller_appointment_reminder"
+  ) {
+    // A person texting the seller is a person taking over: stop an auto-enrolled
+    // Book appointment drip. Best-effort (the helper never throws); imported
+    // lazily so the send path keeps its module graph.
+    try {
+      const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
+      await pauseHotBookAppointmentOnTakeover({
+        propertyIds: [input.propertyId],
+        actor: input.takeoverActorId
+          ? { actorType: "user", actorId: input.takeoverActorId }
+          : { actorType: "system" },
+      });
+    } catch {
+      // Never fails a send that already succeeded.
+    }
+  }
+  return outcome;
+}
+
+async function sendSmsToContactInner(
   supabase: SupabaseClient<Database>,
   input: SendSmsInput,
   manualDispatch?: { provider: MessagingProvider; authorize: (messageId: string) => Promise<void> },
@@ -907,6 +970,10 @@ export async function sendSmsToContact(
     const freshCheck = await checkFreshAutomatedSuppression(supabase, {
       propertyId: input.propertyId,
       contactId: input.contactId,
+      // Campaign and drip/sequence sends only; AI replies and person-clicked
+      // held drafts are not blocked by the stop-texting / hostile hold.
+      blockOpenConfirmHold:
+        !input.personInitiated && (!!input.campaignId || !!input.sequenceContext),
     });
     if (!freshCheck.ok) {
       await supabase
@@ -951,6 +1018,37 @@ export async function sendSmsToContact(
   // provider intent as `unknown` in the same transaction. Keep the provider
   // invocation directly after this await: there must be no intervening read
   // or write that could make a cancellation appear to prove non-delivery.
+  if (input.sequenceContext && !input.personInitiated) {
+    // Stop-texting / hostile hold, final read for sequence sends. It runs
+    // BEFORE the authorization RPC so a read failure leaves the claim
+    // `not_attempted` and the tick retries it. The race with a hold committed
+    // after this read is closed by the RPC itself: the hold flow pauses the
+    // property's enrollments before it sets the hold flag, and the RPC
+    // re-locks the enrollment and requires status = 'active'.
+    const seqHold = await readOpenConfirmHold(supabase, input.propertyId);
+    if (!seqHold.ok || seqHold.open) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: seqHold.ok
+            ? CONFIRM_HOLD_BLOCK_REASON
+            : `Held: could not confirm current hold state before sending (${seqHold.error}).`,
+        })
+        .eq("id", pending.id);
+      return seqHold.ok
+        ? {
+          status: "blocked_automated_suppressed",
+          messageId: pending.id,
+          reason: CONFIRM_HOLD_BLOCK_REASON,
+          source: "open_confirm_hold",
+          outreachDispo: propertyResult.data.outreach_dispo ?? null,
+          consentState: null,
+        }
+        : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: seqHold.error };
+    }
+  }
   if (input.sequenceContext) {
     const { data: authorization, error: authorizationError } = await supabase.rpc(
       "authorize_sequence_provider_attempt",
@@ -1024,6 +1122,30 @@ export async function sendSmsToContact(
       propertyId: input.propertyId, body: input.body,
       enrollmentId: input.sequenceContext?.enrollmentId,
     });
+    // §5.4 final send boundary: a test-tagged lead / work item may reach only an owned
+    // (TEST_DEST_ALLOWLIST) number. No test tag = unchanged. Refused = never reaches the provider.
+    const allow = await checkSendAllowed(supabase, {
+      orgId: propertyResult.data.org_id,
+      propertyId: input.propertyId,
+      destination: destination.phone,
+      origin: input.origin,
+      personInitiated: input.personInitiated === true,
+      testRunId: input.testRunId ?? null,
+      messageId: pending.id,
+    });
+    if (!allow.allowed) {
+      const retired = await retireRefusedRow(supabase, pending.id, inputMetadata);
+      if (input.repSmsReceipt) {
+        await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
+          providerError: allow.why,
+        });
+      }
+      // An unreadable test tag is a transient read failure, not a refusal: the same contract as
+      // an unreadable consent / suppression state (every caller already retries or holds it).
+      return allow.why === "refused_non_owned"
+        ? { status: "blocked_before_provider", messageId: pending.id, retired, refusal: TEST_SEND_REFUSED }
+        : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: allow.why === "safety_obligation_open" ? OBLIGATION_UNRESOLVED : TEST_TAG_UNREADABLE };
+    }
     if (input.beforeProviderSubmit) {
       let proceed = false;
       try {
@@ -1044,6 +1166,36 @@ export async function sendSmsToContact(
           });
         }
         return { status: "blocked_before_provider", messageId: pending.id, retired };
+      }
+    }
+    // Final dispatch boundary for the stop-texting / hostile hold: re-read it
+    // as the LAST await before the provider call, so a hold committed while
+    // the earlier checks ran still stops a campaign / sequence send.
+    // Sequence sends do this read before their authorization RPC instead (see
+    // above): no read may follow the RPC that moves the claim to `unknown`.
+    if (input.origin === "automated" && !input.personInitiated && !!input.campaignId && !input.sequenceContext) {
+      const finalHold = await readOpenConfirmHold(supabase, input.propertyId);
+      if (!finalHold.ok || finalHold.open) {
+        await supabase
+          .from("messages")
+          .update({
+            status: "failed",
+            failed_at: new Date().toISOString(),
+            error_message: finalHold.ok
+              ? CONFIRM_HOLD_BLOCK_REASON
+              : `Held: could not confirm current hold state before sending (${finalHold.error}).`,
+          })
+          .eq("id", pending.id);
+        return finalHold.ok
+          ? {
+            status: "blocked_automated_suppressed",
+            messageId: pending.id,
+            reason: CONFIRM_HOLD_BLOCK_REASON,
+            source: "open_confirm_hold",
+            outreachDispo: propertyResult.data.outreach_dispo ?? null,
+            consentState: null,
+          }
+          : { status: "blocked_fresh_state_unavailable", messageId: pending.id, error: finalHold.error };
       }
     }
     providerCallStarted = true;
@@ -1086,7 +1238,9 @@ export async function sendSmsToContact(
     const updates: MessagesUpdate = {
       status: "sent",
       external_id: result.externalId,
-      sent_at: new Date().toISOString(),
+      // DB clock ('now' is evaluated by Postgres): the send gate compares sent_at with the
+      // inbound's created_at (DB clock), so an app clock running ahead/behind cannot misorder them.
+      sent_at: "now",
       metadata: {
         ...(inputMetadata ?? {}),
         providerStatus: result.providerStatus,
@@ -1556,6 +1710,32 @@ export async function releaseQueuedMessage(
   supabase: SupabaseClient<Database>,
   messageId: string,
 ): Promise<SendSmsOutcome> {
+  const outcome = await releaseQueuedMessageInner(supabase, messageId);
+  if (outcome.status === "sent") {
+    // A person's queued text finally going out is a takeover too (same rule as an
+    // immediate manual send); automated queue rows and seller reminders are not.
+    try {
+      const { data: row } = await supabase
+        .from("messages")
+        .select("property_id, metadata")
+        .eq("id", messageId)
+        .maybeSingle();
+      const meta = readMetadataRecord(row?.metadata ?? null);
+      if (row?.property_id && resolveQueuedSendOrigin(row.metadata ?? null) === "manual" && meta?.kind !== "seller_appointment_reminder") {
+        const { pauseHotBookAppointmentOnTakeover } = await import("@/lib/sequences/hot-lead-takeover");
+        await pauseHotBookAppointmentOnTakeover({ propertyIds: [row.property_id], actor: { actorType: "system" } });
+      }
+    } catch {
+      // Never fails a send that already succeeded.
+    }
+  }
+  return outcome;
+}
+
+async function releaseQueuedMessageInner(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+): Promise<SendSmsOutcome> {
   let provider;
   try {
     provider = getMessagingProvider();
@@ -1972,6 +2152,8 @@ export async function releaseQueuedMessage(
     const freshCheck = await checkFreshAutomatedSuppression(supabase, {
       propertyId: msg.property_id,
       contactId: msg.contact_id,
+      // Queued campaign rows only (manual composer rows never reach here).
+      blockOpenConfirmHold: !!msg.campaign_id,
     });
     if (!freshCheck.ok) {
       const { error: holdError } = await supabase
@@ -2030,6 +2212,68 @@ export async function releaseQueuedMessage(
     await assertCanarySendBinding(supabase, {
       propertyId: msg.property_id, body: claimed.body,
     });
+    // §5.4 final send boundary (queued release path): same allowlist rule as an immediate send.
+    const allow = msg.property_id
+      ? await checkSendAllowed(supabase, {
+        orgId: msg.org_id ?? null,
+        propertyId: msg.property_id,
+        destination: msg.to_address ?? "",
+        origin: "queued_release",
+        queuedSendOrigin: queuedOrigin,
+        messageId: msg.id,
+      })
+      : { allowed: true as const };
+    if (!allow.allowed && (allow.why === "taint_lookup_failed" || allow.why === "safety_obligation_open")) {
+      // A database blip must delay this queued text, never kill it: back to queued, a little
+      // later (nothing reached the provider). The drain retries it on a later tick.
+      const { error: requeueError } = await supabase
+        .from("messages")
+        .update({ status: "queued", scheduled_for: new Date(Date.now() + TEST_TAG_RETRY_MS).toISOString() })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (requeueError) return { status: "db_error", error: requeueError.message };
+      return { status: "blocked_fresh_state_unavailable", messageId: msg.id, error: allow.why === "safety_obligation_open" ? OBLIGATION_UNRESOLVED : TEST_TAG_UNREADABLE };
+    }
+    if (!allow.allowed) {
+      const { error: refuseError } = await supabase
+        .from("messages")
+        .update({ status: "failed", failed_at: new Date().toISOString(), error_message: allow.why })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (refuseError) return { status: "db_error", error: refuseError.message };
+      return { status: "blocked_before_provider", messageId: msg.id, retired: true, refusal: TEST_SEND_REFUSED };
+    }
+    // Final dispatch boundary for the stop-texting / hostile hold (queued
+    // campaign rows): last await before the provider call.
+    if (queuedOrigin === "automated" && msg.campaign_id && msg.property_id) {
+      const finalHold = await readOpenConfirmHold(supabase, msg.property_id);
+      if (!finalHold.ok) {
+        // A read blip delays this text (back to queued), never sends it.
+        const { error: requeueError } = await supabase
+          .from("messages")
+          .update({ status: "queued", scheduled_for: new Date(Date.now() + TEST_TAG_RETRY_MS).toISOString() })
+          .eq("id", msg.id)
+          .eq("status", "pending");
+        if (requeueError) return { status: "db_error", error: requeueError.message };
+        return { status: "blocked_fresh_state_unavailable", messageId: msg.id, error: finalHold.error };
+      }
+      if (finalHold.open) {
+        const { error: holdError } = await supabase
+          .from("messages")
+          .update({ status: "failed", failed_at: new Date().toISOString(), error_message: CONFIRM_HOLD_BLOCK_REASON })
+          .eq("id", msg.id)
+          .eq("status", "pending");
+        if (holdError) return { status: "db_error", error: holdError.message };
+        return {
+          status: "blocked_automated_suppressed",
+          messageId: msg.id,
+          reason: CONFIRM_HOLD_BLOCK_REASON,
+          source: "open_confirm_hold",
+          outreachDispo: null,
+          consentState: null,
+        };
+      }
+    }
     const result = await provider.sendSms({
       to: msg.to_address,
       body: claimed.body,
@@ -2041,7 +2285,7 @@ export async function releaseQueuedMessage(
     const updates: MessagesUpdate = {
       status: "sent",
       external_id: result.externalId,
-      sent_at: new Date().toISOString(),
+      sent_at: "now", // DB clock (see the immediate send above)
       failed_at: null,
       error_message: null,
       metadata: {
@@ -2472,9 +2716,16 @@ type FreshSuppressionCheck =
  */
 async function checkFreshAutomatedSuppression(
   supabase: SupabaseClient<Database>,
-  args: { propertyId: string; contactId: string },
+  args: { propertyId: string; contactId: string; blockOpenConfirmHold?: boolean },
 ): Promise<FreshSuppressionCheck> {
-  let propertyResult: { data: { outreach_dispo: string | null } | null; error: { message: string } | null };
+  let propertyResult: {
+    data: {
+      outreach_dispo: string | null;
+      needs_human_attention?: boolean | null;
+      last_ai_escalation_reason?: string | null;
+    } | null;
+    error: { message: string } | null;
+  };
   let contactResult: {
     data: { do_not_contact: boolean | null; sms_opted_out: boolean | null } | null;
     error: { message: string } | null;
@@ -2484,7 +2735,7 @@ async function checkFreshAutomatedSuppression(
     [propertyResult, contactResult, consentResult] = await Promise.all([
       supabase
         .from("properties")
-        .select("outreach_dispo")
+        .select("outreach_dispo, needs_human_attention, last_ai_escalation_reason")
         .eq("id", args.propertyId)
         .maybeSingle(),
       supabase
@@ -2524,6 +2775,17 @@ async function checkFreshAutomatedSuppression(
         : "fresh suppression state reload: contact row not found",
     };
   }
+  if (args.blockOpenConfirmHold && hasOpenConfirmHold(propertyResult.data)) {
+    return {
+      ok: true,
+      decision: {
+        suppressed: true,
+        reason: CONFIRM_HOLD_BLOCK_REASON,
+        source: "open_confirm_hold",
+        outreachDispo: propertyResult.data.outreach_dispo ?? null,
+      },
+    };
+  }
   const decision = evaluateAutomatedSuppression({
     outreachDispo: propertyResult.data?.outreach_dispo ?? null,
     consentState: consentResult.ok ? consentResult.state : "no_consent",
@@ -2531,6 +2793,28 @@ async function checkFreshAutomatedSuppression(
     smsOptedOut: contactResult.data?.sms_opted_out ?? null,
   });
   return { ok: true, decision: decision.suppressed ? decision : null };
+}
+
+/**
+ * Fresh read of the stop-texting / hostile hold on one property. Fail closed:
+ * any read error or missing row is `{ ok: false }` and the caller holds the send.
+ */
+async function readOpenConfirmHold(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+): Promise<{ ok: true; open: boolean } | { ok: false; error: string }> {
+  try {
+    const { data, error } = await supabase
+      .from("properties")
+      .select("needs_human_attention, last_ai_escalation_reason")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (error) return { ok: false, error: error.message };
+    if (!data) return { ok: false, error: "hold state reload: property row not found" };
+    return { ok: true, open: hasOpenConfirmHold(data) };
+  } catch (e) {
+    return { ok: false, error: `hold state reload threw: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 
 /**

@@ -1,18 +1,32 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { loadHeldPropertyIds, loadMessagesV2Data, type LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import type { LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import { loadHeldPropertyIds, loadMessagesV2Data } from "./alert-loader";
 import { loadRunLabels } from "@/app/(dashboard)/messages-v2/labels";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
 import type { Database } from "@/lib/supabase/types";
 
 import { createChannelSenders } from "./channels";
+import { loadSlackThread } from "./slack-thread";
+import { loadV2Opportunities, v2OpportunityStillAllowed } from "./v2-opportunities";
+import { loadV2OutboxAlerts, v2OutboxAlertGate } from "./v2-outbox-alerts";
 import { runHoldAlertsForOrg } from "./core";
-import { parseHotHoldReasons, toAlertHolds } from "./holds";
+import { toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
-import type { HoldAlertDeps, HoldInfo, OrgAlertSummary, Recipient } from "./types";
+import type {
+  HoldAlertDeps,
+  HoldInfo,
+  HotPromotion,
+  OrgAlertSummary,
+  Recipient,
+} from "./types";
+import { HOT_FAILED_SOURCE_TYPE, HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, resolveHotOwner } from "@/lib/hot-sellers/assign";
+import { hotFailedKey, hotFlagKey, hotHandoffKey, hotTextKey, leadReplyKey } from "@/lib/hot-sellers/hot";
+import { MAX_ATTEMPTS } from "./types";
+import { loadAmbiguousThreadAlerts } from "./ambiguous-threads";
+import { loadLeadReplies } from "./lead-replies";
 
-export { HOT_HOLD_REASONS, parseHotHoldReasons } from "./holds";
 export { runHoldAlertsForOrg } from "./core";
 
 type MembershipRow = {
@@ -28,24 +42,31 @@ const MEMBERSHIP_COLUMNS =
 
 /** Owner or Acquisitions caller, with active Sandra access. Same predicate at load and at send. */
 export function isHoldAlertRecipient(m: MembershipRow): boolean {
-  return hasActiveSandraAccess(m) && (m.role === "owner" || isAcquisitionsCaller(m));
+  return (
+    hasActiveSandraAccess(m) && (m.role === "owner" || isAcquisitionsCaller(m))
+  );
 }
 
-export function resolveAppBaseUrl(env: Record<string, string | undefined> = process.env): string {
+export function resolveAppBaseUrl(
+  env: Record<string, string | undefined> = process.env,
+): string {
   const raw =
-    env.NEXT_PUBLIC_APP_URL ?? env.VERCEL_PROJECT_PRODUCTION_URL ?? "https://sandra-sooty.vercel.app";
+    env.NEXT_PUBLIC_APP_URL ??
+    env.VERCEL_PROJECT_PRODUCTION_URL ??
+    "https://sandra-sooty.vercel.app";
   return (raw.startsWith("http") ? raw : `https://${raw}`).replace(/\/+$/, "");
 }
 
 /**
- * Open holds from the SAME derivation as the page. The run window the page
- * loader selects includes inbound_preview; it is dropped here (hold -> HoldInfo
- * keeps ids and first name only) and never reaches an alert payload.
+ * Open holds from the FROZEN pre-#874 loader (alert-loader.ts, pinned by hash to
+ * queries.ts at 84ddabdd6), deliberately isolated from the page's own queries so
+ * a page change can never change alert decisions. The run window it selects
+ * includes inbound_preview; it is dropped here (hold -> HoldInfo keeps ids and
+ * first name only) and never reaches an alert payload.
  */
 async function loadAlertHolds(
   db: LooseSupabase,
   orgId: string,
-  hotReasons: readonly string[],
   alertsSince: string,
   nowMs: number,
 ): Promise<{ holds: HoldInfo[]; complete: boolean }> {
@@ -59,8 +80,199 @@ async function loadAlertHolds(
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  const complete = data.holdsMeta.failed.length === 0;
-  return { holds: toAlertHolds(data.holds, labels, hotReasons), complete };
+  let complete = data.holdsMeta.failed.length === 0;
+  const holds = toAlertHolds(data.holds, labels);
+  // The hot hold's own moment (flag time) for its alert key and cutoff, read
+  // here so the frozen loader stays untouched.
+  const hotIds = [...new Set(holds.filter((h) => h.hot).map((h) => h.propertyId))];
+  const flagAt = new Map<string, string | null>();
+  for (let i = 0; i < hotIds.length; i += 200) {
+    const res = await db
+      .from("properties")
+      .select("id, last_ai_escalation_at")
+      .eq("org_id", orgId)
+      .in("id", hotIds.slice(i, i + 200));
+    if (res.error) {
+      complete = false;
+      continue;
+    }
+    for (const p of (res.data ?? []) as Array<{ id: string; last_ai_escalation_at: string | null }>) flagAt.set(p.id, p.last_ai_escalation_at);
+  }
+  return { holds: holds.map((h) => (h.hot ? { ...h, flagAt: flagAt.get(h.propertyId) ?? null } : h)), complete };
+}
+
+const HOT_PROMOTION_PAGE = 200;
+
+/** Same 7-day window as the frozen hold loader (and never before HOT_ALERTS_START_ISO via the watermark). */
+export const HOT_ALERT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Hot sellers to alert: Sandra's hand-off ('assigned', source hot_seller_handoff)
+ * and hot texts on a lead Jarrad already owned ('ai_escalated', source
+ * hot_seller_text), since max(watermark, now - 7 days), NEWEST first, keyset-paged
+ * to exhaustion, minus keys whose deliveries are already finished (one bulk
+ * query). So history never grows a pass and the newest seller is never starved.
+ * First name from the homeowner contact (+ address for hot texts); never message text.
+ */
+export async function loadHotPromotions(
+  db: LooseSupabase,
+  orgId: string,
+  alertsSince: string,
+  nowMs: number = Date.now(),
+  /**
+   * The CURRENT resolved hot owner. An event is "finished" only when THIS
+   * recipient has terminal rows on both channels, so an owner change re-opens
+   * it for the new owner. null (unresolved) → any recipient counts (nothing
+   * is sent without a resolved owner anyway).
+   */
+  currentOwner: string | null = null,
+): Promise<{ promotions: HotPromotion[]; complete: boolean }> {
+  type Row = {
+    id: string;
+    property_id: string;
+    source_type: string;
+    source_id: string;
+    payload: { to?: unknown; inbound?: unknown; covered_by_hold?: unknown; held_lead?: unknown; escalation?: unknown } | null;
+    created_at: string;
+  };
+  const sinceMs = Math.max(Date.parse(alertsSince), nowMs - HOT_ALERT_LOOKBACK_MS);
+  const since = new Date(Number.isFinite(sinceMs) ? sinceMs : nowMs - HOT_ALERT_LOOKBACK_MS).toISOString();
+  const rows: Row[] = [];
+  let complete = true;
+  let before: { at: string; id: string } | null = null;
+  for (;;) {
+    let q = db
+      .from("lead_events")
+      .select("id, property_id, source_type, source_id, payload, created_at")
+      .eq("org_id", orgId)
+      .in("source_type", [HOT_HANDOFF_SOURCE_TYPE, HOT_TEXT_SOURCE_TYPE, HOT_FAILED_SOURCE_TYPE])
+      .gte("created_at", since);
+    if (before) q = q.or(`created_at.lt.${before.at},and(created_at.eq.${before.at},id.lt.${before.id})`);
+    const { data, error } = await q
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(HOT_PROMOTION_PAGE);
+    if (error) return { promotions: [], complete: false };
+    const page = (data ?? []) as Row[];
+    rows.push(...page);
+    if (page.length < HOT_PROMOTION_PAGE) break;
+    const last = page[page.length - 1]!;
+    before = { at: last.created_at, id: last.id };
+  }
+  const keyOf = (r: Row) =>
+    r.source_type === HOT_TEXT_SOURCE_TYPE
+      ? hotTextKey(r.source_id)
+      : r.source_type === HOT_FAILED_SOURCE_TYPE
+        ? typeof (r.payload as { flag_at?: unknown } | null)?.flag_at === "string"
+          ? hotFlagKey(r.property_id, (r.payload as { flag_at: string }).flag_at)
+          : hotFailedKey(r.source_id)
+        : hotHandoffKey(r.source_id);
+  // Finished keys (both channels sent, skipped, or out of attempts) drop out before any task is built.
+  const done = new Set<string>();
+  const keys = [...new Set(rows.map(keyOf))];
+  for (let i = 0; i < keys.length; i += HOT_PROMOTION_PAGE) {
+    const { data, error } = await db
+      .from("hold_alert_deliveries")
+      .select("hold_key, channel, status, attempts, recipient_user_id")
+      .eq("org_id", orgId)
+      .in("hold_key", keys.slice(i, i + HOT_PROMOTION_PAGE));
+    if (error) {
+      complete = false;
+      continue;
+    }
+    const finished = new Map<string, Set<string>>();
+    for (const d of (data ?? []) as Array<{ hold_key: string; channel: string; status: string; attempts: number; recipient_user_id: string }>) {
+      if (currentOwner && d.recipient_user_id !== currentOwner) continue;
+      const isDone = d.status === "sent" || d.status === "skipped" || (d.status === "failed" && d.attempts >= MAX_ATTEMPTS);
+      if (!isDone) continue;
+      const set = finished.get(d.hold_key) ?? new Set<string>();
+      set.add(d.channel);
+      finished.set(d.hold_key, set);
+    }
+    for (const [k, set] of finished) if (set.has("slack") && set.has("sms")) done.add(k);
+  }
+  // Exactly one alert per inbound: a text that already alerted (or is alerting)
+  // as lead_reply:<inbound> never sends a second, hot, alert.
+  const leadReplied = new Set<string>();
+  const srcIds = [...new Set(rows.map((r) => r.source_id))];
+  for (let i = 0; i < srcIds.length; i += HOT_PROMOTION_PAGE) {
+    const { data, error } = await db
+      .from("hold_alert_deliveries")
+      .select("hold_key, status, attempts")
+      .eq("org_id", orgId)
+      .in("hold_key", srcIds.slice(i, i + HOT_PROMOTION_PAGE).map(leadReplyKey));
+    if (error) {
+      // Unknown → hold the hot alert back this pass rather than risk two.
+      complete = false;
+      for (const id of srcIds.slice(i, i + HOT_PROMOTION_PAGE)) leadReplied.add(id);
+      continue;
+    }
+    // Only a live or sent lead reply stands in for the hot alert; a skipped or
+    // terminally failed one never swallows it.
+    for (const d of (data ?? []) as Array<{ hold_key: string; status: string; attempts: number }>) {
+      const live = d.status === "pending" || d.status === "sending" || d.status === "sent" || (d.status === "failed" && d.attempts < MAX_ATTEMPTS);
+      if (live) leadReplied.add(d.hold_key.slice("lead_reply:".length));
+    }
+  }
+  const todo0 = rows.filter((r) => !done.has(keyOf(r)) && !leadReplied.has(r.source_id));
+  // A hot event's moment is its INBOUND text's arrival, never when the event
+  // row was written (a pre-cutoff text retried later must not page). Every
+  // event's source_id is that inbound; no verifiable time → dropped (fail closed).
+  const inboundAt = new Map<string, string>();
+  const inboundIds = [...new Set(todo0.map((r) => r.source_id))];
+  for (let i = 0; i < inboundIds.length; i += HOT_PROMOTION_PAGE) {
+    const { data, error } = await db
+      .from("messages")
+      .select("id, created_at")
+      .eq("org_id", orgId)
+      .in("id", inboundIds.slice(i, i + HOT_PROMOTION_PAGE));
+    if (error) {
+      complete = false;
+      continue;
+    }
+    for (const m of (data ?? []) as Array<{ id: string; created_at: string | null }>) if (m.created_at) inboundAt.set(m.id, m.created_at);
+  }
+  const todo = todo0.filter((r) => inboundAt.has(r.source_id));
+  if (todo.length < todo0.length) complete = false;
+  const ids = [...new Set(todo.map((r) => r.property_id))];
+  const names = new Map<string, string>();
+  const addresses = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += HOT_PROMOTION_PAGE) {
+    const { data: props, error: propError } = await db
+      .from("properties")
+      .select("id, address, city, assigned_user_id, contacts:homeowner_contact_id(first_name)")
+      .in("id", ids.slice(i, i + HOT_PROMOTION_PAGE));
+    if (propError) complete = false;
+    for (const p of (props ?? []) as Array<{ id: string; address: string | null; city: string | null; assigned_user_id: string | null; contacts: { first_name: string | null } | null }>) {
+      const first = p.contacts?.first_name?.trim();
+      if (first) names.set(p.id, first);
+      const addr = [p.address?.trim(), p.city?.trim()].filter(Boolean).join(", ");
+      if (addr) addresses.set(p.id, addr);
+    }
+  }
+  const promotions: HotPromotion[] = [];
+  for (const r of todo) {
+    const failed = r.source_type === HOT_FAILED_SOURCE_TYPE;
+    const to = typeof r.payload?.to === "string" ? r.payload.to : null;
+    if (!to && !failed) continue;
+    // An open hot hold already pinged Jarrad about this lead.
+    if (r.payload?.covered_by_hold === true) continue;
+    // Assignment never gates a hot alert (owner decision 2026-10-19): Jarrad gets it whoever has the lead.
+    promotions.push({
+      propertyId: r.property_id,
+      assigneeUserId: to ?? "",
+      name: names.get(r.property_id) ?? "Unknown sender",
+      assignedAt: inboundAt.get(r.source_id) as string,
+      kind: r.source_type === HOT_TEXT_SOURCE_TYPE ? "hot_text" : failed ? "hot_failed" : "handoff",
+      ...(r.payload?.held_lead === true ? { heldLead: true } : {}),
+      ...(failed && typeof (r.payload as { reason?: unknown } | null)?.reason === "string"
+        ? { reason: (r.payload as { reason: string }).reason }
+        : {}),
+      address: r.source_type === HOT_TEXT_SOURCE_TYPE ? (addresses.get(r.property_id) ?? null) : null,
+      key: keyOf(r),
+    });
+  }
+  return { promotions, complete };
 }
 
 export function createHoldAlertDeps(
@@ -69,17 +281,62 @@ export function createHoldAlertDeps(
 ): HoldAlertDeps {
   const db = admin as unknown as LooseSupabase;
   const senders = createChannelSenders(admin, { env });
-  const hotReasons = parseHotHoldReasons(env);
   const now = () => new Date();
+  const ambiguousThreadEnabled = env.HOLD_ALERT_AMBIGUOUS_THREAD_ENABLED === "1";
   return {
     now,
     store: createSupabaseDeliveryStore(db),
     baseUrl: resolveAppBaseUrl(env),
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
-    loadHolds: (orgId, alertsSince) => loadAlertHolds(db, orgId, hotReasons, alertsSince, now().getTime()),
+    loadHolds: (orgId, alertsSince) =>
+      loadAlertHolds(db, orgId, alertsSince, now().getTime()),
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
+    async loadHotPromotions(orgId, alertsSince) {
+      const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
+      const hot = await loadHotPromotions(db, orgId, alertsSince, now().getTime(), owner);
+      // Routing v2 opportunity alert: returns nothing unless routing_v2_flags.questions_live + replies.
+      const opportunities = await loadV2Opportunities(db, orgId, alertsSince, now().getTime(), owner).catch(
+        // Never let the v2 opportunity alert break today's hot alerts.
+        () => ({ promotions: [], complete: true }),
+      );
+      // Routing v2 owner alerts queued by live transitions (questions_live + replies only).
+      const outboxAlerts = await loadV2OutboxAlerts(db, orgId, alertsSince, now().getTime(), owner).catch(
+        () => ({ promotions: [], complete: true }),
+      );
+      if (opportunities.promotions.length === 0 && opportunities.complete
+        && outboxAlerts.promotions.length === 0 && outboxAlerts.complete) return hot;
+      // One alert per delivery key: today's hot alert first, then v2 alerts, then opportunities.
+      const existingKeys = new Set(hot.promotions.map((p) => p.key));
+      const v2 = outboxAlerts.promotions.filter((p) => !existingKeys.has(p.key));
+      for (const p of v2) existingKeys.add(p.key);
+      return {
+        promotions: [...hot.promotions, ...v2, ...opportunities.promotions.filter((p) => !existingKeys.has(p.key))],
+        complete: hot.complete && opportunities.complete && outboxAlerts.complete,
+      };
+    },
+    async loadLeadReplies(orgId, alertsSince) {
+      const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
+      return ambiguousThreadEnabled
+        ? loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner, { ambiguousOwnsKeys: true })
+        : loadLeadReplies(db, orgId, alertsSince, now().getTime(), owner);
+    },
+    ...(ambiguousThreadEnabled
+      ? {
+          async loadAmbiguousThreadAlerts(orgId: string, since: string) {
+            const owner = await resolveHotOwner(admin, orgId, env).catch(() => null);
+            return loadAmbiguousThreadAlerts(db, orgId, since, now().getTime(), owner);
+          },
+        }
+      : {}),
+    loadHotOwner: (orgId) => resolveHotOwner(admin, orgId, env),
+    loadSlackThread: (orgId, lookup) => loadSlackThread(db, orgId, lookup, now().getTime()),
+    v2OpportunityStillAllowed: (orgId, propertyId, inboundId) => v2OpportunityStillAllowed(db, orgId, propertyId, inboundId),
+    v2OutboxAlertGate: (outboxId, key) => v2OutboxAlertGate(db, outboxId, key),
     async loadRecipients(orgId): Promise<Recipient[]> {
-      const { data, error } = await db.from("memberships").select(MEMBERSHIP_COLUMNS).eq("org_id", orgId);
+      const { data, error } = await db
+        .from("memberships")
+        .select(MEMBERSHIP_COLUMNS)
+        .eq("org_id", orgId);
       if (error) throw new Error(`memberships lookup failed: ${error.message}`);
       return ((data ?? []) as MembershipRow[])
         .filter(isHoldAlertRecipient)
@@ -92,7 +349,8 @@ export function createHoldAlertDeps(
         .eq("org_id", orgId)
         .eq("user_id", userId)
         .maybeSingle();
-      if (error) throw new Error(`membership re-check failed: ${error.message}`);
+      if (error)
+        throw new Error(`membership re-check failed: ${error.message}`);
       if (!data) return false;
       const m = data as MembershipRow;
       if (!isHoldAlertRecipient(m)) return false;
@@ -103,7 +361,9 @@ export function createHoldAlertDeps(
 }
 
 /** Kill switch: alerts send only when HOLD_ALERTS_ENABLED is exactly "1". Default off. */
-export function holdAlertsEnabled(env: Record<string, string | undefined> = process.env): boolean {
+export function holdAlertsEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
   return env.HOLD_ALERTS_ENABLED === "1";
 }
 
@@ -127,7 +387,9 @@ export async function runHoldAlertsForAllOrgs(
 ): Promise<AllOrgsSummary> {
   const env = opts.env ?? process.env;
   if (!holdAlertsEnabled(env)) {
-    (opts.log ?? ((m: string) => console.warn(m)))("hold alerts skipped: HOLD_ALERTS_ENABLED is not 1");
+    (opts.log ?? ((m: string) => console.warn(m)))(
+      "hold alerts skipped: HOLD_ALERTS_ENABLED is not 1",
+    );
     return {
       disabled: true,
       orgs: 0,
@@ -141,12 +403,21 @@ export async function runHoldAlertsForAllOrgs(
       archived: 0,
       errors: 0,
       budgetExhausted: false,
+      hotOwnerUnknown: false,
     };
   }
   const db = admin as unknown as LooseSupabase;
-  const { data, error } = await db.from("ai_responder_configs").select("org_id").eq("active", true);
-  if (error) throw new Error(`ai_responder_configs lookup failed: ${error.message}`);
-  const orgIds = [...new Set(((data ?? []) as Array<{ org_id: string }>).map((r) => r.org_id))];
+  const { data, error } = await db
+    .from("ai_responder_configs")
+    .select("org_id")
+    .eq("active", true);
+  if (error)
+    throw new Error(`ai_responder_configs lookup failed: ${error.message}`);
+  const orgIds = [
+    ...new Set(
+      ((data ?? []) as Array<{ org_id: string }>).map((r) => r.org_id),
+    ),
+  ];
 
   const deps = createHoldAlertDeps(admin, env);
   const total: AllOrgsSummary = {
@@ -161,6 +432,7 @@ export async function runHoldAlertsForAllOrgs(
     archived: 0,
     errors: 0,
     budgetExhausted: false,
+    hotOwnerUnknown: false,
   };
   const startMs = Date.now();
   const budgetMs = opts.budgetMs ?? 50_000;
@@ -181,6 +453,7 @@ export async function runHoldAlertsForAllOrgs(
       total.interrupted += s.interrupted;
       total.archived += s.archived;
       total.budgetExhausted ||= s.budgetExhausted;
+      total.hotOwnerUnknown ||= s.hotOwnerUnknown;
     } catch (e) {
       total.errors += 1;
       opts.onError?.(e, orgId);

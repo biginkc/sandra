@@ -202,3 +202,62 @@ export function assertNoRealPhones(
   };
   walk(value, "");
 }
+
+const STREET_SUFFIX =
+  "(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|pl|place|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pass|cv|cove|sq|square|trce|trace|vw|view|rdg|ridge|pt|point|xing|crossing|aly|alley|bnd|bend|hl|hills?|holw|hollow|mdw|meadows?|pk|park|spg|spring|stra|walk|row|path|pike|bay)";
+// "1234 N Main St", "415 West 12th Street Apt 4", "88 Oak Hollow Dr."
+const ADDRESS_IN_TEXT = new RegExp(
+  `\\b\\d{1,6}\\s+(?:(?:N|S|E|W|NE|NW|SE|SW|North|South|East|West)\\.?\\s+)?(?:[A-Za-z0-9'.-]+\\s+){0,3}?${STREET_SUFFIX}\\b\\.?(?:\\s+${STREET_SUFFIX}\\b\\.?)*(?:\\s+(?:apt|unit|suite|ste|#)\\s*#?\\w+)?`,
+  "gi",
+);
+
+/** Replace street addresses in free text with [address]. Best-effort; numbers-only amounts are untouched. */
+export function maskAddresses(text: string): string {
+  return maskNumberWordFragments(text.replace(ADDRESS_IN_TEXT, "[address]"));
+}
+
+// Words that legitimately follow a 3-5 digit number in a text (amounts, times, units), so the
+// number+word fallback leaves them alone.
+const NOT_ADDRESS_WORDS = new Set(
+  "for dollars dollar bucks buck k cash to and a an per or the is in on at if i it my we you me us but down max min dolars usd cents days day months month years year yrs yr hours hour am pm sq sqft feet ft acres acre units unit beds bed baths bath percent pct x not no yes more less than over under after before from with plus total minimum maximum offer offers firm now lol thanks thank".split(" "),
+);
+const NUMBER_WORDS_FALLBACK = /\b\d{3,5}\s+([A-Za-z][A-Za-z.'-]*)(?:\s+[A-Za-z][A-Za-z.'-]*)?/g;
+
+/** Fallback: 3-5 digit number followed by an alphabetic word (and one more) reads as an address fragment. */
+export function maskNumberWordFragments(text: string): string {
+  return text.replace(NUMBER_WORDS_FALLBACK, (m, w: string) => (NOT_ADDRESS_WORDS.has(w.toLowerCase()) ? m : "[address]"));
+}
+
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Mask known property addresses and their street-name parts (case-insensitive). */
+export function buildKnownAddressMasker(rows: readonly { address?: string | null; city?: string | null }[]): (text: string) => string {
+  const full = new Set<string>();
+  const streets = new Set<string>();
+  const cities = new Set<string>();
+  for (const r of rows) {
+    const a = (r.address ?? "").split(",")[0].trim();
+    if (a.length >= 5) full.add(a);
+    const m = /^\d+\s+(?:(?:N|S|E|W|NE|NW|SE|SW|North|South|East|West)\.?\s+)?(.+)$/i.exec(a);
+    if (m) {
+      const street = m[1].trim();
+      const first = street.split(/\s+/)[0];
+      if (street.length >= 6) streets.add(street);
+      if (first.length >= 6) streets.add(first);
+    }
+    const c = (r.city ?? "").trim();
+    if (c.length >= 4) cities.add(c);
+  }
+  const alt = (set: Set<string>) =>
+    [...set].sort((a, b) => b.length - a.length).map((s) => esc(s).replace(/\s+/g, "\\s+")).join("|");
+  const fullRe = full.size ? new RegExp(`\\b(?:${alt(full)})\\b`, "gi") : null;
+  const streetRe = streets.size ? new RegExp(`\\b(?:${alt(streets)})\\b`, "gi") : null;
+  const cityRe = cities.size ? new RegExp(`\\b(?:${alt(cities)})\\b`, "gi") : null;
+  return (text) => {
+    let t = text;
+    if (fullRe) t = t.replace(fullRe, "[address]");
+    if (streetRe) t = t.replace(streetRe, "[street]");
+    if (cityRe) t = t.replace(cityRe, "[city]");
+    return t;
+  };
+}

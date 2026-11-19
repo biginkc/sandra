@@ -8,6 +8,13 @@ const { createServerClient } = vi.hoisted(() => ({
 vi.mock("@supabase/ssr", () => ({ createServerClient }));
 
 import { isPublicPath, updateSession } from "./middleware";
+import { createHugoSessionProof, hugoSessionCookieName } from "@/lib/auth/hugo-session-proof";
+
+const trustedClaims = {
+  sub: "seeded-auth-user", iss: "https://copflsklaefwzipsrjqz.supabase.co/auth/v1",
+  session_id: "session-a", amr: [{ method: "oauth", timestamp: 1784616840 }],
+};
+
 
 function mockProtectedSession({
   memberships = [] as Array<{ user_id: string }>,
@@ -35,7 +42,7 @@ function mockProtectedSession({
   });
   const getClaims = vi.fn().mockResolvedValue({
     data: {
-      claims: { amr: [{ method: authMethod, timestamp: 1784616840 }] },
+      claims: { ...trustedClaims, amr: [{ method: authMethod, timestamp: 1784616840 }] },
     },
     error: null,
   });
@@ -73,6 +80,7 @@ function mockProtectedSession({
 
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
+  vi.stubEnv("HUGO_SESSION_PROOF_SECRET", "ab".repeat(32));
   vi.stubEnv(
     "NEXT_PUBLIC_SUPABASE_URL",
     "https://copflsklaefwzipsrjqz.supabase.co",
@@ -155,7 +163,7 @@ describe("updateSession membership authorization", () => {
     getUser.mockResolvedValue({ data: { user: null } });
 
     const response = await updateSession(
-      new NextRequest("https://sandra.test/api/internal/direct-call-watchdog"),
+      await authenticatedRequest("https://sandra.test/api/internal/direct-call-watchdog"),
     );
 
     expect(response.status).toBe(200);
@@ -168,7 +176,7 @@ describe("updateSession membership authorization", () => {
     getUser.mockResolvedValue({ data: { user: null } });
 
     const response = await updateSession(
-      new NextRequest("https://sandra.test/api/internal/direct-call-watchdog/child"),
+      await authenticatedRequest("https://sandra.test/api/internal/direct-call-watchdog/child"),
     );
 
     expect(response.status).toBe(307);
@@ -181,7 +189,7 @@ describe("updateSession membership authorization", () => {
     });
 
     const response = await updateSession(
-      new NextRequest("https://sandra.test/dashboard"),
+      await authenticatedRequest("https://sandra.test/dashboard"),
     );
 
     expect(response.status).toBe(200);
@@ -202,7 +210,7 @@ describe("updateSession membership authorization", () => {
     });
 
     const response = await updateSession(
-      new NextRequest("https://sandra.test/dashboard"),
+      await authenticatedRequest("https://sandra.test/dashboard"),
     );
 
     expect(response.status).toBe(200);
@@ -221,7 +229,7 @@ describe("updateSession membership authorization", () => {
     });
 
     const response = await updateSession(
-      new NextRequest("https://sandra.test/dashboard"),
+      await authenticatedRequest("https://sandra.test/dashboard"),
     );
 
     expect(response.headers.get("location")).toBe(
@@ -236,7 +244,7 @@ describe("updateSession membership authorization", () => {
       memberships: [{ user_id: "seeded-auth-user" }],
       authMethod: "password",
     });
-    const request = new NextRequest("https://sandra.test/dashboard", {
+    const request = await authenticatedRequest("https://sandra.test/dashboard", {
       headers: {
         cookie:
           "sb-copflsklaefwzipsrjqz-auth-token.0=password-session-chunk",
@@ -265,7 +273,7 @@ describe("updateSession membership authorization", () => {
     });
 
     const response = await updateSession(
-      new NextRequest("https://sandra.test/dashboard"),
+      await authenticatedRequest("https://sandra.test/dashboard"),
     );
 
     expect(response.status).toBe(200);
@@ -278,7 +286,7 @@ describe("updateSession membership authorization", () => {
     const { signOut } = mockProtectedSession({
       signOutResult: { error: { message: "remote sign-out failed" } },
     });
-    const request = new NextRequest("https://sandra.test/dashboard", {
+    const request = await authenticatedRequest("https://sandra.test/dashboard", {
       headers: {
         cookie:
           "sb-copflsklaefwzipsrjqz-auth-token.0=seeded-session-chunk",
@@ -298,7 +306,7 @@ describe("updateSession membership authorization", () => {
 
   it("denies a seeded auth cookie when sign-out throws", async () => {
     const { signOut } = mockProtectedSession({ signOutThrows: true });
-    const request = new NextRequest("https://sandra.test/leads", {
+    const request = await authenticatedRequest("https://sandra.test/leads", {
       headers: {
         cookie:
           "sb-copflsklaefwzipsrjqz-auth-token-code-verifier=seeded-verifier; sb-copflsklaefwzipsrjqz-auth-token=seeded-session",
@@ -320,7 +328,7 @@ describe("updateSession membership authorization", () => {
     mockProtectedSession({ membershipThrows: true });
 
     const response = await updateSession(
-      new NextRequest("https://sandra.test/import"),
+      await authenticatedRequest("https://sandra.test/import"),
     );
 
     expect(response.headers.get("location")).toBe(
@@ -336,7 +344,7 @@ describe("updateSession membership authorization", () => {
   ])("denies stale no-membership sessions before browser OAuth route %s", async (path) => {
     const { from, signOut } = mockProtectedSession();
     const response = await updateSession(
-      new NextRequest(`https://sandra.test${path}`, {
+      await authenticatedRequest(`https://sandra.test${path}`, {
         headers: {
           cookie:
             "sb-copflsklaefwzipsrjqz-auth-token.0=stale-session-chunk",
@@ -362,7 +370,7 @@ describe("updateSession membership authorization", () => {
     });
 
     const response = await updateSession(
-      new NextRequest(`https://sandra.test${path}`),
+      await authenticatedRequest(`https://sandra.test${path}`),
     );
 
     expect(response.status).toBe(200);
@@ -375,7 +383,7 @@ describe("updateSession membership authorization", () => {
       const { from, signOut } = mockProtectedSession();
 
       const response = await updateSession(
-        new NextRequest(`https://sandra.test${path}`),
+        await authenticatedRequest(`https://sandra.test${path}`),
       );
 
       expect(response.status).toBe(200);
@@ -387,8 +395,8 @@ describe("updateSession membership authorization", () => {
 
 describe("action authorization denial transport", () => {
   const cookieName = "sb-copflsklaefwzipsrjqz-auth-token.0";
-  function actionRequest() {
-    return new NextRequest("https://sandra.test/my-leads?view=queue", {
+  async function actionRequest() {
+    return await authenticatedRequest("https://sandra.test/my-leads?view=queue", {
       method: "POST",
       headers: { "Next-Action": "synthetic-action-id", cookie: `${cookieName}=stale` },
     });
@@ -408,7 +416,7 @@ describe("action authorization denial transport", () => {
   it("redirects expired action sessions without admitting the action", async () => {
     const { getUser, from } = mockProtectedSession();
     getUser.mockResolvedValue({ data: { user: null } } as never);
-    const response = await updateSession(actionRequest());
+    const response = await updateSession(await actionRequest());
     await expectActionDenial(response, "https://sandra.test/login?view=queue&next=%2Fmy-leads%3Fview%3Dqueue");
     expect(getUser).toHaveBeenCalledOnce();
     expect(from).not.toHaveBeenCalled();
@@ -423,7 +431,7 @@ describe("action authorization denial transport", () => {
         },
       },
     }));
-    const response = await updateSession(actionRequest());
+    const response = await updateSession(await actionRequest());
     expect(response.cookies.get("sb-copflsklaefwzipsrjqz-auth-token.1")?.value).toBe("");
     expect(response.headers.get("set-cookie")).not.toContain("failed-refresh-chunk");
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -435,7 +443,7 @@ describe("action authorization denial transport", () => {
   ])("retains HTTP 307 for $method without an action POST", async ({ method, actionHeader }) => {
     const { getUser } = mockProtectedSession();
     getUser.mockResolvedValue({ data: { user: null } } as never);
-    const response = await updateSession(new NextRequest("https://sandra.test/my-leads", {
+    const response = await updateSession(await authenticatedRequest("https://sandra.test/my-leads", {
       method, headers: actionHeader ? { "Next-Action": "synthetic-action-id" } : {},
     }));
     expect(response.status).toBe(307);
@@ -446,7 +454,7 @@ describe("action authorization denial transport", () => {
   it("preserves domain rejection and cookie clearing for actions", async () => {
     const { getUser, signOut, from } = mockProtectedSession();
     getUser.mockResolvedValue({ data: { user: { id: "seeded-auth-user", email: "outsider@example.invalid", identities: [] } } });
-    const response = await updateSession(actionRequest());
+    const response = await updateSession(await actionRequest());
     await expectActionDenial(response, "https://sandra.test/login?error=domain");
     expect(signOut).toHaveBeenCalledOnce();
     expect(from).not.toHaveBeenCalled();
@@ -454,7 +462,7 @@ describe("action authorization denial transport", () => {
 
   it("preserves missing membership rejection even if sign-out fails", async () => {
     const { signOut, from } = mockProtectedSession({ memberships: [], signOutThrows: true });
-    const response = await updateSession(actionRequest());
+    const response = await updateSession(await actionRequest());
     await expectActionDenial(response, "https://sandra.test/login?error=access");
     expect(from).toHaveBeenCalledWith("memberships");
     expect(signOut).toHaveBeenCalledWith({ scope: "local" });
@@ -462,7 +470,7 @@ describe("action authorization denial transport", () => {
 
   it("preserves invalid Hugo proof rejection for actions", async () => {
     const { getClaims, from } = mockProtectedSession({ authMethod: "password" });
-    const response = await updateSession(actionRequest());
+    const response = await updateSession(await actionRequest());
     await expectActionDenial(response, "https://sandra.test/login?error=password_disabled");
     expect(getClaims).toHaveBeenCalledOnce();
     expect(from).not.toHaveBeenCalled();
@@ -470,10 +478,59 @@ describe("action authorization denial transport", () => {
 
   it("still authorizes valid actions instead of converting them to denials", async () => {
     const { getUser, from } = mockProtectedSession({ memberships: [{ user_id: "seeded-auth-user" }] });
-    const response = await updateSession(actionRequest());
+    const response = await updateSession(await actionRequest());
     expect(response.headers.get("x-middleware-next")).toBe("1");
     expect(response.headers.has("x-action-redirect")).toBe(false);
     expect(getUser).toHaveBeenCalledOnce();
     expect(from).toHaveBeenCalledWith("memberships");
+  });
+});
+
+async function authenticatedRequest(...args: ConstructorParameters<typeof NextRequest>) {
+  const request = new NextRequest(...args);
+  request.cookies.set(hugoSessionCookieName(request), await createHugoSessionProof(trustedClaims, trustedClaims.sub, request.nextUrl.origin));
+  return request;
+}
+
+
+describe("Hugo session isolation regressions", () => {
+  it("keeps an older authenticated session after another login changes the shared identity", async () => {
+    const { getUser, getClaims, signOut } = mockProtectedSession({ memberships: [{ user_id: trustedClaims.sub }] });
+    const requestA = await authenticatedRequest("https://sandra.test/dashboard");
+    expect((await updateSession(requestA)).headers.get("x-middleware-next")).toBe("1");
+    // Another browser logs in 13 minutes later. Supabase updates the same
+    // account identity, while A retains its original OAuth AMR/session ID.
+    getUser.mockResolvedValue({ data: { user: { id: trustedClaims.sub,
+      email: "seeded@bmhgroupkc.com", identities: [{ provider: "custom:hugo",
+      last_sign_in_at: "2026-04-21T00:00:00Z", updated_at: new Date((1784616840 + 780) * 1000).toISOString() }] } } });
+    expect((await updateSession(requestA)).headers.get("x-middleware-next")).toBe("1");
+    getClaims.mockResolvedValue({ data: { claims: { ...trustedClaims,
+      amr: [...trustedClaims.amr, { method: "token_refresh", timestamp: 1784620440 }] } }, error: null });
+    expect((await updateSession(requestA)).headers.get("x-middleware-next")).toBe("1");
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it("rejects a different OAuth session that copies the same account's proof", async () => {
+    const { getClaims, signOut } = mockProtectedSession({ memberships: [{ user_id: trustedClaims.sub }] });
+    getClaims.mockResolvedValue({ data: { claims: { ...trustedClaims, session_id: "other-provider-session" } }, error: null });
+    const response = await updateSession(await authenticatedRequest("https://sandra.test/dashboard"));
+    expect(response.headers.get("location")).toContain("error=password_disabled");
+    expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+  });
+
+  it("requires one verified callback for pre-deployment sessions without proof", async () => {
+    const { from } = mockProtectedSession({ memberships: [{ user_id: trustedClaims.sub }] });
+    const response = await updateSession(new NextRequest("https://sandra.test/dashboard"));
+    expect(response.headers.get("location")).toContain("error=password_disabled");
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("returns a non-cacheable 503 without revoking sessions when the key is missing", async () => {
+    const { signOut } = mockProtectedSession();
+    vi.stubEnv("HUGO_SESSION_PROOF_SECRET", "");
+    const response = await updateSession(new NextRequest("https://sandra.test/dashboard"));
+    expect(response.status).toBe(503);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(signOut).not.toHaveBeenCalled();
   });
 });

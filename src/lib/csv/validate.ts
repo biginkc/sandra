@@ -1,3 +1,4 @@
+import { parseDealMachineContact } from "./dealmachine-contact";
 import { ALL_FIELDS, PROPERTY_FIELDS, type TargetField } from "./schema";
 import { isDoNotCallLabel, lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
 import {
@@ -135,6 +136,14 @@ export function validateRow(
     normalized[field.id] = normalizeByType(field, raw);
   }
 
+  if (mapping.dealmachine_source_row) {
+    try {
+      const person = parseDealMachineContact(normalized.dealmachine_source_row);
+      if (!person || person.sourceId !== normalized.dealmachine_person_id) throw new Error("DealMachine person identity does not match source row");
+    } catch (error) {
+      errors.push({ fieldId: "dealmachine_source_row", label: "DealMachine Source Row", value: null, rule: "invalid_source", message: error instanceof Error ? error.message : "Invalid DealMachine source row" });
+    }
+  }
   // Pass 1b: decode per-phone do-not-call markers. DealMachine flags a
   // number "DO NOT CALL" inside its line-type column instead of a
   // separate DNC field; that label normalizes to 'unknown' so the number

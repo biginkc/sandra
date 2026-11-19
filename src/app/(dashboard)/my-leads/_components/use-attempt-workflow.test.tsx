@@ -5,7 +5,7 @@ const actions = vi.hoisted(() => ({ submitMyLeadCommand: vi.fn(), submitMyLeadHa
 vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand, submitMyLeadHandoffDrip: actions.submitMyLeadHandoffDrip }))
 
 import type { QueueRow } from "@/lib/my-leads/queries"
-import { useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
+import { routeOf, useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
 
 const VIEWER = { userId: "user-1", orgId: "org-1" }
 const row = (overrides: Partial<QueueRow> = {}) =>
@@ -596,3 +596,8 @@ describe("useAttemptWorkflow", () => {
   })
 })
 
+
+it("freezes the finalize recovery route for linked DialPad calls", () => {
+  expect(routeOf("log-attempt", { source: "dialpad", callActivityId: "call-1" })).toBe("finalize_attempt")
+  expect(routeOf("log-attempt", { source: "dialpad", callActivityId: null })).toBe("log_attempt")
+})

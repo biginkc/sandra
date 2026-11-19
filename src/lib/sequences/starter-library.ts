@@ -22,9 +22,11 @@ export type StarterSequence = {
   description: string;
   steps: ReadonlyArray<{
     delay_after_previous_minutes: number;
-    action_type: "send_sms" | "change_status";
+    action_type: "send_sms" | "change_status" | "send_voicemail_drop";
     template_body?: string;
     target_status?: string;
+    vm_media_id?: string;
+    vm_tts_body?: string;
   }>;
 };
 

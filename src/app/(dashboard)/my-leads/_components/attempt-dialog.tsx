@@ -118,7 +118,7 @@ export function AcquisitionAttemptDialog({
   const recovery = useContext(WorkflowRecoveryContext)
   const reconciliation = recovery?.reconciliation
   const reconciliationLocked = Boolean(reconciliation)
-  const preservedCallId = reconciliationLocked && source === "sandra" && callActivityId && !callReferenceOptions.some(call => call.id === callActivityId)
+  const preservedCallId = reconciliationLocked && source !== "manual" && callActivityId && !callReferenceOptions.some(call => call.id === callActivityId)
     ? callActivityId
     : null
   const availableCalls = initialCallActivityId && !callReferenceOptions.some(call => call.id === initialCallActivityId)
@@ -278,7 +278,7 @@ export function AcquisitionAttemptDialog({
       occurredAt: occurred.value,
       note: note.trim() || null,
       recordingUrl: recordingUrl.trim() || null,
-      callActivityId: source === "sandra" ? callActivityId.trim() : null,
+      callActivityId: source !== "manual" ? callActivityId.trim() || null : null,
       ...(followUp ? {
         smsBody: followUp.finalBody,
         followUp: {
@@ -331,6 +331,7 @@ export function AcquisitionAttemptDialog({
                     const nextSource = event.target.value as AcquisitionAttemptSource
                     if (nextSource === "sandra" && !sandraAvailable) return
                     setSource(nextSource)
+                    if (nextSource === "manual") setCallActivityId("")
                     if (nextSource === "sandra" && availableCalls.length === 1) setCallActivityId(availableCalls[0].id)
                     setKind(nextSource === "manual" ? "outreach" : "call")
                     clearClientErrors()
@@ -359,7 +360,7 @@ export function AcquisitionAttemptDialog({
                 </div>
               ) : (
                 <div className="flex flex-col justify-end gap-1.5 text-sm text-muted-foreground">
-                  {source === "sandra" ? "Existing Sandra call" : "DialPad manual call"}
+                  {source === "sandra" ? "Existing Sandra call" : "DialPad call"}
                 </div>
               )}
             </div>
@@ -379,25 +380,25 @@ export function AcquisitionAttemptDialog({
               )}
             </div>
 
-            {source === "sandra" && (
+            {(source === "sandra" || (source === "dialpad" && sandraAvailable)) && (
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center">
-                  <Label htmlFor="acquisition-attempt-call-reference">Sandra call</Label>
-                  <RequiredHint />
+                  <Label htmlFor="acquisition-attempt-call-reference">{source === "sandra" ? "Sandra call" : "Call to resolve (optional)"}</Label>
+                  {source === "sandra" && <RequiredHint />}
                 </div>
                 {sandraAvailable ? (
                   <select
                     id="acquisition-attempt-call-reference"
-                    aria-label="Sandra call"
+                    aria-label={source === "sandra" ? "Sandra call" : "Call to resolve"}
                     value={callActivityId}
                 disabled={attemptRecorded || reconciliationLocked}
                     onChange={(event) => setCallActivityId(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
                     aria-describedby={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId ? "acquisition-attempt-call-reference-error" : undefined}
-                    aria-required="true"
+                    aria-required={source === "sandra"}
                     className={SELECT_FIELD_CLASS}
                   >
-                    <option value="">Choose a call</option>
+                    <option value="">{source === "sandra" ? "Choose a call" : "Match by recording link, or log a separate call"}</option>
                     {availableCalls.map((reference) => (
                       <option key={reference.id} value={reference.id}>
                         {reference.label}
@@ -556,7 +557,7 @@ export function AcquisitionAttemptDialog({
             />
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="acquisition-attempt-recording">Recording link {source === "dialpad" ? "(required)" : "(optional)"}</Label>
+              <Label htmlFor="acquisition-attempt-recording">Recording link {source === "dialpad" && !callActivityId ? "(required)" : "(optional)"}</Label>
               <Input
                 id="acquisition-attempt-recording"
                 type="url"
