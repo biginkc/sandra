@@ -25,8 +25,8 @@ it("smoke: webhook -> workflow -> v2 decision -> outbox -> mock send", async () 
   const leads = await seedLeads(pg, org, 4);
   const calls: WorkflowCall[] = [];
   workflowSink.onStart = (c) => calls.push(c);
-  const texts = ["It's going to have to be via text. I'm blind in one ear and can't see or of the other.", "Not interested", "Who is this?", "How does it work?"];
-  stubs.jevOverride = (r) => r === "Not interested" ? { not_interested: 0.95 } : r === "Who is this?" ? { asked_who: 0.95 } : r === "How does it work?" ? { how_it_works: 0.95 } : null;
+  const texts = ["Texting is easier for me than a phone call.", "Not interested", "Who is this?", "How does it work?"];
+  stubs.jevOverride = (r) => r === "Texting is easier for me than a phone call." ? {} : r === "Not interested" ? { not_interested: 0.95 } : r === "Who is this?" ? { asked_who: 0.95 } : r === "How does it work?" ? { how_it_works: 0.95 } : null;
   for (let i = 0; i < 4; i++) expect(await deliverWebhook({ externalId: `smoke-${org.runId}-${i}`, from: leads[i]!.phone, to: org.sender, body: texts[i]! })).toBe(200);
   console.log("workflow starts", calls.length);
   for (const c of calls) console.log(JSON.stringify(await c.fn(c.params)));
