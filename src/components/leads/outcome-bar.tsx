@@ -111,17 +111,25 @@ export function OutcomeBar({
     if (syncFromProps) setDispo(initialDispo);
   }
 
+  function notifySuccess(message: string) {
+    toast.success(message, { description: propertyAddress ?? "Address unavailable" });
+  }
+
+  function notifyError(message: string) {
+    toast.error(message, { description: propertyAddress ?? "Address unavailable" });
+  }
+
   function apply(newDispo: OutreachDispo) {
     startTransition(async () => {
       const previousDispo = dispo;
-      const result = await setOutreachDispo(propertyId, newDispo);
+      const result = await setOutreachDispo(propertyId, newDispo).catch(() => ({ ok: false as const, error: "Could not confirm the outcome. Check its current status before retrying.", committed: false }));
       if (result.ok) {
         setDispo(newDispo);
-        if (newDispo === "wrong_number") {
-          toast.info(
-            "Marked wrong number — consider skip-tracing a new number.",
-          );
-        }
+        notifySuccess(
+          newDispo === "wrong_number"
+            ? "Marked wrong number — consider skip-tracing a new number."
+            : `Saved: ${DISPO_LABELS[newDispo]}`,
+        );
         if (previousDispo !== newDispo) onDispositionChanged?.();
         if (DRIP_AFFECTING_DISPOS.has(newDispo)) onDripChanged?.();
       } else if (result.committed) {
@@ -129,14 +137,32 @@ export function OutcomeBar({
         setDispo(newDispo);
         if (previousDispo !== newDispo) onDispositionChanged?.();
         if (DRIP_AFFECTING_DISPOS.has(newDispo)) onDripChanged?.();
-        toast.error(result.error);
+        notifyError(result.error);
       } else {
-        toast.error(result.error);
+        notifyError(result.error);
       }
     });
   }
 
+  function handleDripResult(result: PickResult, sequenceId: string) {
+    setFailedStart(result.status === "enrolled" ? null : { reason: result.reason, sequenceId, saved: result.saved !== false });
+    if (result.status === "enrolled") {
+      notifySuccess("Drip started");
+    } else {
+      notifyError(`${result.saved !== false ? "Outcome saved. " : ""}Drip not started: ${result.reason}`);
+    }
+  }
+
   async function chooseDrip(sequenceId: string, afterSavedOutcome = false): Promise<PickResult> {
+    try {
+      return await chooseDripResult(sequenceId, afterSavedOutcome);
+    } catch (error) {
+      notifyError("Could not confirm the drip start. Check its current status before retrying.");
+      throw error;
+    }
+  }
+
+  async function chooseDripResult(sequenceId: string, afterSavedOutcome: boolean): Promise<PickResult> {
     // Let the server check protected outcomes and the current enrollment,
     // even when this render already knows about an active or paused drip.
     if (afterSavedOutcome) {
@@ -153,7 +179,7 @@ export function OutcomeBar({
         onDispositionChanged?.();
         onDripChanged?.();
       }
-      return { status: "failed", reason: result.error, saved: false };
+      return { status: "failed", reason: result.error, saved: result.committed === true };
     }
     setDispo("needs_sequence");
     onDispositionChanged?.();
@@ -166,44 +192,47 @@ export function OutcomeBar({
     setSwitching(true);
     try {
       const result = await changeDripAction(activeDripEnrollmentId, failedStart.sequenceId);
-      if (!result.ok) { setFailedStart({ ...failedStart, reason: result.error.message }); return; }
-      if (result.data.status !== "enrolled") { setFailedStart({ ...failedStart, reason: result.data.reason }); return; }
+      if (!result.ok) { setFailedStart({ ...failedStart, reason: result.error.message }); notifyError(result.error.message); return; }
+      if (result.data.status !== "enrolled") { setFailedStart({ ...failedStart, reason: result.data.reason }); notifyError(result.data.reason); return; }
       setFailedStart(null);
       onDispositionChanged?.();
-      toast.success("Switched drip");
+      notifySuccess("Switched drip");
       router.refresh();
     } catch {
-      setFailedStart({ ...failedStart, reason: "Could not switch drips. Open the lead to review its current drip." });
+      const reason = "Could not switch drips. Open the lead to review its current drip.";
+      setFailedStart({ ...failedStart, reason });
+      notifyError(reason);
     } finally { setSwitching(false); onDripChanged?.(); }
   }
 
   async function leaveToOwner() {
-    const result = await setOutreachDispo(propertyId, "needs_sequence");
+    const result = await setOutreachDispo(propertyId, "needs_sequence").catch(() => ({ ok: false as const, committed: false, error: "Could not confirm the outcome. Check its current status before retrying." }));
     if (!result.ok) {
       if (result.committed) {
         setDispo("needs_sequence");
         onDispositionChanged?.();
         onDripChanged?.();
       }
+      notifyError(result.error);
       throw new Error(result.error);
     }
     setDispo("needs_sequence");
     onDispositionChanged?.();
     onDripChanged?.();
+    notifySuccess("Saved: Needs drip — left for lead owner");
   }
 
   function moveToLead() {
     startTransition(async () => {
-      const result = await moveMessageThreadToLead(propertyId);
+      const result = await moveMessageThreadToLead(propertyId).catch(() => ({ ok: false as const, error: "Could not confirm the move to lead. Check its current status before retrying." }));
       if (result.ok) {
         setWasMovedToLead(true);
-        toast.success(
-          result.alreadyQualified ? "Opening lead" : "Moved to lead",
+        notifySuccess(
+          result.alreadyQualified ? "Already a lead" : "Moved to lead",
         );
-        router.push(`/leads/${propertyId}`);
         router.refresh();
       } else {
-        toast.error(result.error);
+        notifyError(result.error);
       }
     });
   }
@@ -234,7 +263,7 @@ export function OutcomeBar({
         Not interested
       </button>
       {dispo === "not_interested" && <StartDripPicker triggerLabel="Also start a drip" onChoose={(id) => chooseDrip(id, true)} disabled={pending || dripPickersDisabled}
-        onResult={(result, sequenceId) => setFailedStart(result.status === "enrolled" ? null : { reason: result.reason, sequenceId, saved: result.saved !== false })} />}
+        onResult={handleDripResult} />}
 
       <button
         onClick={() => apply("nurture")}
@@ -263,7 +292,7 @@ export function OutcomeBar({
 
       <div data-testid="dispo-needs-sequence">
         <StartDripPicker triggerLabel="Needs drip" onChoose={chooseDrip} onLeave={leaveToOwner} disabled={pending || dripPickersDisabled}
-          onResult={(result, sequenceId) => setFailedStart(result.status === "enrolled" ? null : { reason: result.reason, sequenceId, saved: result.saved !== false })} />
+          onResult={handleDripResult} />
       </div>
       {failedStart ? <div className="w-full rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-stone-800" role="alert" data-testid="drip-cant-start">
         <p className="font-bold">Can&apos;t start this drip</p>

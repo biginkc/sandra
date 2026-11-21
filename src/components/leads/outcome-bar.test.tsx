@@ -28,8 +28,8 @@ vi.mock("sonner", () => ({
   toast: { success: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 vi.mock("@/components/appointments/book-appointment-popover", () => ({
-  BookAppointmentPopover: ({ triggerLabel }: { triggerLabel: string }) => (
-    <button data-testid="book-appointment">{triggerLabel}</button>
+  BookAppointmentPopover: ({ triggerLabel, onBooked }: { triggerLabel: string; onBooked?: () => void }) => (
+    <button data-testid="book-appointment" onClick={onBooked}>{triggerLabel}</button>
   ),
 }));
 
@@ -140,6 +140,7 @@ describe("<OutcomeBar />", () => {
       await waitFor(() => expect(setOutreachDispoMock).toHaveBeenCalledWith("prop-1", "needs_sequence"));
       expect(setInboxDispoAndStartDripMock).not.toHaveBeenCalled();
       await waitFor(() => expect(onDripChanged).toHaveBeenCalled());
+      expect(toast.success).toHaveBeenCalledWith("Saved: Needs drip — left for lead owner", { description: "123 Main St" });
     });
 
     it("Not interested then Also start a drip enrolls and notifies the drip card", async () => {
@@ -150,6 +151,7 @@ describe("<OutcomeBar />", () => {
       await waitFor(() => expect(startDripForLeadsMock).toHaveBeenCalledWith("s1", ["prop-1"]));
       await waitFor(() => expect(onDripChanged).toHaveBeenCalledTimes(1));
       expect(setOutreachDispoMock).not.toHaveBeenCalled();
+      expect(toast.success).toHaveBeenCalledWith("Drip started", { description: "123 Main St" });
     });
 
     it("does not notify the drip card when the extra drip is refused", async () => {
@@ -170,7 +172,7 @@ describe("<OutcomeBar />", () => {
       const user = userEvent.setup();
       const { onDispositionChanged, onDripChanged } = renderBar({ initialDispo: "nurture" });
       await user.click(screen.getByTestId("dispo-wrong-number"));
-      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Could not save"));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Could not save", { description: "123 Main St" }));
       expect(screen.getByText("Follow up", { selector: "span" })).toBeInTheDocument();
       expect(onDispositionChanged).not.toHaveBeenCalled();
       expect(onDripChanged).not.toHaveBeenCalled();
@@ -248,7 +250,7 @@ describe("<OutcomeBar />", () => {
       const { onDripChanged, onDispositionChanged } = renderBar();
       await user.click(screen.getByTestId("dispo-more"));
       await user.click(await screen.findByTestId("dispo-opted-out"));
-      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Consent failed"));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Consent failed", { description: "123 Main St" }));
       expect(screen.getByText("SMS opted out")).toBeInTheDocument();
       expect(onDispositionChanged).toHaveBeenCalledTimes(1);
       expect(onDripChanged).toHaveBeenCalledTimes(1);
@@ -265,9 +267,19 @@ describe("<OutcomeBar />", () => {
       const user = userEvent.setup();
       const { onDripChanged } = renderBar();
       await user.click(screen.getByTestId("dispo-wrong-number"));
-      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Nope"));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Nope", { description: "123 Main St" }));
       expect(screen.queryByText("Wrong #")).toBeNull();
       expect(onDripChanged).not.toHaveBeenCalled();
+    });
+
+    it.each(["failed", "skipped"] as const)("announces a refused drip switch: %s", async (status) => {
+      changeDripActionMock.mockResolvedValue({ ok: true, data: { status, reason: "Replacement not started" } });
+      const user = userEvent.setup();
+      renderBar({ activeDripEnrollmentId: "e1", activeDripSequenceId: "current", initialFailedStart: { sequenceId: "s1", reason: "Already in Current drip", saved: true } });
+      await user.click(screen.getByRole("button", { name: "Switch to this drip" }));
+      expect(toast.error).toHaveBeenCalledOnce();
+      expect(toast.error).toHaveBeenCalledWith("Replacement not started", { description: "123 Main St" });
+      expect(toast.success).not.toHaveBeenCalled();
     });
 
     it("refreshes the drip card in finally after a failed switch, keeping the alert", async () => {
@@ -286,6 +298,7 @@ describe("<OutcomeBar />", () => {
       await user.click(await screen.findByRole("button", { name: "Switch to this drip" }));
       await waitFor(() => expect(onDripChanged).toHaveBeenCalled());
       expect(await screen.findByTestId("drip-cant-start")).toHaveTextContent("Replacement failed");
+      expect(toast.error).toHaveBeenLastCalledWith("Replacement failed", { description: "123 Main St" });
     });
 
     it("refreshes the drip card after a thrown switch", async () => {
@@ -304,6 +317,7 @@ describe("<OutcomeBar />", () => {
       await user.click(await screen.findByRole("button", { name: "Switch to this drip" }));
       await waitFor(() => expect(onDripChanged).toHaveBeenCalled());
       expect(await screen.findByTestId("drip-cant-start")).toHaveTextContent("Could not switch drips");
+      expect(toast.error).toHaveBeenLastCalledWith("Could not switch drips. Open the lead to review its current drip.", { description: "123 Main St" });
     });
   });
 
@@ -350,6 +364,92 @@ describe("<OutcomeBar />", () => {
   });
 
   describe("Messages defaults", () => {
+    it("announces a saved outcome when its drip start fails", async () => {
+      setInboxDispoAndStartDripMock.mockResolvedValue({ ok: false, committed: true, error: "Enrollment failed" });
+      const user = userEvent.setup();
+      renderBar({}, {});
+      await user.click(screen.getByRole("button", { name: /^Needs drip$/ }));
+      await pickSeedDrip(user);
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Outcome saved. Drip not started: Enrollment failed", { description: "123 Main St" }));
+      expect(toast.success).not.toHaveBeenCalled();
+    });
+
+    it("announces completion only after the outcome is saved", async () => {
+      let complete!: (result: { ok: true }) => void;
+      setOutreachDispoMock.mockReturnValue(new Promise((resolve) => { complete = resolve; }));
+      const user = userEvent.setup();
+      renderBar({}, {});
+      await user.click(screen.getByTestId("dispo-follow-up"));
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(screen.getByTestId("dispo-follow-up")).toBeDisabled();
+      complete({ ok: true });
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Saved: Follow up", { description: "123 Main St" }));
+    });
+
+    it.each([
+      ["dispo-wrong-number", "Marked wrong number — consider skip-tracing a new number."],
+      ["dispo-not-interested", "Saved: Not interested"],
+      ["dispo-bad-number", "Saved: Bad / disconnected #"],
+      ["dispo-opted-out", "Saved: SMS opted out"],
+    ])("announces the saved outcome for %s", async (button, message) => {
+      const user = userEvent.setup();
+      renderBar({}, {});
+      if (button === "dispo-bad-number" || button === "dispo-opted-out") await user.click(screen.getByTestId("dispo-more"));
+      await user.click(await screen.findByTestId(button));
+      expect(toast.success).toHaveBeenCalledTimes(1);
+      expect(toast.success).toHaveBeenCalledWith(message, { description: "123 Main St" });
+    });
+
+    it.each([false, true])("does not announce success for a failed outcome (committed=%s)", async (committed) => {
+      setOutreachDispoMock.mockResolvedValue({ ok: false, committed, error: "Safety update failed" });
+      const user = userEvent.setup();
+      renderBar({}, {});
+      await user.click(screen.getByTestId("dispo-follow-up"));
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.error).toHaveBeenCalledWith("Safety update failed", { description: "123 Main St" });
+    });
+
+    it.each(["enrolled", "failed", "skipped"] as const)("announces the actual drip result: %s", async (status) => {
+      setInboxDispoAndStartDripMock.mockResolvedValue({ ok: true, enrollment: { status, reason: "Result detail" } });
+      const user = userEvent.setup();
+      renderBar({}, {});
+      await user.click(screen.getByRole("button", { name: /^Needs drip$/ }));
+      await pickSeedDrip(user);
+      if (status === "enrolled") expect(toast.success).toHaveBeenCalledWith("Drip started", { description: "123 Main St" });
+      else {
+        expect(toast.success).not.toHaveBeenCalled();
+        expect(toast.error).toHaveBeenCalledWith("Outcome saved. Drip not started: Result detail", { description: "123 Main St" });
+      }
+    });
+
+    it.each([false, true])("keeps Messages open after promotion (alreadyQualified=%s)", async (alreadyQualified) => {
+      moveMessageThreadToLeadMock.mockResolvedValue({ ok: true, alreadyQualified });
+      const user = userEvent.setup();
+      renderBar({ propertyStatus: "prospect" }, {});
+
+      await user.click(screen.getByTestId("message-move-to-lead"));
+
+      expect(moveMessageThreadToLeadMock).toHaveBeenCalledWith("prop-1");
+      expect(routerMock.push).not.toHaveBeenCalled();
+      expect(routerMock.refresh).toHaveBeenCalledOnce();
+      expect(toast.success).toHaveBeenCalledTimes(1);
+      expect(toast.success).toHaveBeenCalledWith(alreadyQualified ? "Already a lead" : "Moved to lead", { description: "123 Main St" });
+      expect(screen.getByTestId("message-move-to-lead")).toBeDisabled();
+    });
+
+    it("keeps a failed promotion retryable without navigating", async () => {
+      moveMessageThreadToLeadMock.mockResolvedValue({ ok: false, error: "Qualification did not save" });
+      const user = userEvent.setup();
+      renderBar({ propertyStatus: "prospect" }, {});
+
+      await user.click(screen.getByTestId("message-move-to-lead"));
+
+      expect(toast.error).toHaveBeenCalledWith("Qualification did not save", { description: "123 Main St" });
+      expect(routerMock.push).not.toHaveBeenCalled();
+      expect(routerMock.refresh).not.toHaveBeenCalled();
+      expect(screen.getByTestId("message-move-to-lead")).toBeEnabled();
+    });
+
     it("shows Move to Lead and Book appt unless told otherwise", () => {
       renderBar({}, {});
       expect(screen.getByTestId("message-move-to-lead")).toBeInTheDocument();
