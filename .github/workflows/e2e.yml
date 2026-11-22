@@ -310,6 +310,14 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261119120000_switchboard_read_norma_interested_since.integration.test.ts
 
+      - name: Switchboard read view norma_lead_thread (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261122120000_switchboard_read_norma_lead_thread.integration.test.ts
+
       - name: My Leads classifier phase 2 perf body vs 20261020130000 baseline, parity across every classifier suite (disposable DB)
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
