@@ -41,6 +41,7 @@ export default defineConfig({
       "supabase/migrations/20261031140300_routing_v2_model_stop_release_obligations.integration.test.ts",
       "supabase/migrations/20261104120000_switchboard_read_norma_lead_details.integration.test.ts",
       "supabase/migrations/20261119120000_switchboard_read_norma_interested_since.integration.test.ts",
+      "supabase/migrations/20261122120000_switchboard_read_norma_lead_thread.integration.test.ts",
       "supabase/migrations/20261021210000_campaign_queue_batched_controls.integration.test.ts",
       "supabase/migrations/20261021130000_deterministic_conflicts_non_retryable_sqlstate.integration.test.ts",
       "supabase/migrations/20261021120000_stale_decision_context_non_retryable_sqlstate.integration.test.ts",
